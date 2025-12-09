@@ -1,0 +1,31 @@
+// prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model Container {
+  id           String   @id @default(cuid())
+  containerNo  String
+  piecesTotal  Int
+  skusTotal    Int
+  containerPay Float
+  createdAt    DateTime @default(now())
+
+  workers WorkerContribution[]
+}
+
+model WorkerContribution {
+  id            String @id @default(cuid())
+  containerId   String
+  name          String
+  minutesWorked Int
+  percentShare  Int
+  payout        Float
+
+  container Container @relation(fields: [containerId], references: [id])
+}
