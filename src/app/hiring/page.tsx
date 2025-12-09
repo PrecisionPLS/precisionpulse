@@ -3,193 +3,120 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
-import { useCurrentUser } from "@/lib/useCurrentUser";
 
 const BUILDINGS = ["DC1", "DC5", "DC11", "DC14", "DC18"];
-const ROLES = [
-  "Lumper",
-  "Lead",
-  "Supervisor",
-  "Building Manager",
-  "Forklift Operator",
-  "Clamp Operator",
-  "Shuttler",
-  "Picker",
-  "Sanitation",
-  "Other",
-];
 
 const STAGES = [
   "Applied",
   "Phone Screen",
-  "Interview",
+  "Onsite Interview",
   "Offer",
   "Hired",
   "Rejected",
 ] as const;
 
-type Stage = (typeof STAGES)[number];
+type CandidateStage = (typeof STAGES)[number];
 
 type CandidateRow = {
   id: string;
-  created_at: string;
-  full_name: string;
-  building: string | null;
-  role_applied: string | null;
-  stage: string | null;
-  source: string | null;
-  phone: string | null;
-  email: string | null;
-  notes: string | null;
-  is_priority: boolean | null;
-  has_experience: boolean | null;
-  target_start_date: string | null; // date
-  last_moved_at: string | null;
+  name: string;
+  phone?: string | null;
+  building?: string | null;
+  stage?: CandidateStage | null;
+  source?: string | null;
+  notes?: string | null;
+  created_at?: string | null;
 };
-
-type Candidate = {
-  id: string;
-  createdAt: string;
-  fullName: string;
-  building: string;
-  roleApplied: string;
-  stage: Stage;
-  source?: string;
-  phone?: string;
-  email?: string;
-  notes?: string;
-  isPriority: boolean;
-  hasExperience: boolean;
-  targetStartDate?: string;
-  lastMovedAt?: string;
-};
-
-function rowToCandidate(row: CandidateRow): Candidate {
-  const stageRaw = (row.stage ?? "Applied") as Stage;
-  return {
-    id: row.id,
-    createdAt: row.created_at ?? new Date().toISOString(),
-    fullName: row.full_name,
-    building: row.building ?? "DC18",
-    roleApplied: row.role_applied ?? "Lumper",
-    stage: STAGES.includes(stageRaw) ? stageRaw : "Applied",
-    source: row.source ?? undefined,
-    phone: row.phone ?? undefined,
-    email: row.email ?? undefined,
-    notes: row.notes ?? undefined,
-    isPriority: row.is_priority ?? false,
-    hasExperience: row.has_experience ?? false,
-    targetStartDate: row.target_start_date ?? undefined,
-    lastMovedAt: row.last_moved_at ?? undefined,
-  };
-}
 
 export default function HiringPage() {
-  const currentUser = useCurrentUser();
-
-  const [candidates, setCandidates] = useState<Candidate[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [candidates, setCandidates] = useState<CandidateRow[]>([]);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [info, setInfo] = useState<string | null>(null);
 
-  // Form state
+  // form state
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [fullName, setFullName] = useState("");
-  const [building, setBuilding] = useState("DC18");
-  const [roleApplied, setRoleApplied] = useState("Lumper");
-  const [stage, setStage] = useState<Stage>("Applied");
-  const [source, setSource] = useState("");
+  const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
-  const [email, setEmail] = useState("");
+  const [building, setBuilding] = useState<string>("DC18");
+  const [stage, setStage] = useState<CandidateStage>("Applied");
+  const [source, setSource] = useState("");
   const [notes, setNotes] = useState("");
-  const [isPriority, setIsPriority] = useState(false);
-  const [hasExperience, setHasExperience] = useState(false);
-  const [targetStartDate, setTargetStartDate] = useState("");
 
-  // Filters
+  // filters
   const [filterBuilding, setFilterBuilding] = useState<string>("ALL");
-  const [filterStage, setFilterStage] = useState<Stage | "ALL">("ALL");
-  const [showPriorityOnly, setShowPriorityOnly] = useState(false);
+  const [filterStage, setFilterStage] = useState<string>("ALL");
   const [search, setSearch] = useState("");
 
-  function resetForm() {
-    setEditingId(null);
-    setFullName("");
-    setBuilding("DC18");
-    setRoleApplied("Lumper");
-    setStage("Applied");
-    setSource("");
-    setPhone("");
-    setEmail("");
-    setNotes("");
-    setIsPriority(false);
-    setHasExperience(false);
-    setTargetStartDate("");
-  }
+  // Load from Supabase once
+  useEffect(() => {
+    refreshFromSupabase();
+  }, []);
 
-  async function loadCandidates() {
-    if (!currentUser) return;
+  async function refreshFromSupabase() {
     setLoading(true);
     setError(null);
-    setInfo(null);
-
     try {
       const { data, error } = await supabase
-        .from("hiring_candidates")
+        .from("hiring_pipeline")
         .select("*")
         .order("created_at", { ascending: false });
 
       if (error) {
-        console.error("Error loading candidates", error);
-        setError("Failed to load hiring pipeline from server.");
-        return;
+        console.error("Error loading hiring pipeline", error);
+        setError("Failed to load hiring pipeline from Supabase.");
+        setCandidates([]);
+      } else {
+        setCandidates((data || []) as CandidateRow[]);
       }
-
-      const rows = (data || []) as CandidateRow[];
-      setCandidates(rows.map(rowToCandidate));
     } catch (e) {
-      console.error("Unexpected error loading candidates", e);
+      console.error("Unexpected error loading hiring pipeline", e);
       setError("Unexpected error loading hiring pipeline.");
+      setCandidates([]);
     } finally {
       setLoading(false);
     }
   }
 
-  useEffect(() => {
-    if (!currentUser) return;
-    loadCandidates();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentUser]);
+  function resetForm() {
+    setEditingId(null);
+    setName("");
+    setPhone("");
+    setBuilding("DC18");
+    setStage("Applied");
+    setSource("");
+    setNotes("");
+  }
+
+  function startEdit(c: CandidateRow) {
+    setEditingId(c.id);
+    setName(c.name || "");
+    setPhone(c.phone || "");
+    setBuilding(c.building || "DC18");
+    setStage((c.stage as CandidateStage) || "Applied");
+    setSource(c.source || "");
+    setNotes(c.notes || "");
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
-    setInfo(null);
 
-    if (!fullName.trim()) {
-      setError("Candidate name is required.");
+    if (!name.trim()) {
+      setError("Please enter a candidate name.");
       return;
     }
-
-    const nowIso = new Date().toISOString();
 
     try {
       if (editingId) {
         const { error } = await supabase
-          .from("hiring_candidates")
+          .from("hiring_pipeline")
           .update({
-            full_name: fullName.trim(),
+            name: name.trim(),
+            phone: phone.trim() || null,
             building,
-            role_applied: roleApplied,
             stage,
             source: source.trim() || null,
-            phone: phone.trim() || null,
-            email: email.trim() || null,
             notes: notes.trim() || null,
-            is_priority: isPriority,
-            has_experience: hasExperience,
-            target_start_date: targetStartDate || null,
-            last_moved_at: nowIso,
           })
           .eq("id", editingId);
 
@@ -198,54 +125,42 @@ export default function HiringPage() {
           setError("Failed to update candidate.");
           return;
         }
-
-        setInfo("Candidate updated.");
       } else {
-        const { error } = await supabase
-          .from("hiring_candidates")
-          .insert({
-            full_name: fullName.trim(),
-            building,
-            role_applied: roleApplied,
-            stage,
-            source: source.trim() || null,
-            phone: phone.trim() || null,
-            email: email.trim() || null,
-            notes: notes.trim() || null,
-            is_priority: isPriority,
-            has_experience: hasExperience,
-            target_start_date: targetStartDate || null,
-            last_moved_at: nowIso,
-          });
+        const { error } = await supabase.from("hiring_pipeline").insert({
+          name: name.trim(),
+          phone: phone.trim() || null,
+          building,
+          stage,
+          source: source.trim() || null,
+          notes: notes.trim() || null,
+        });
 
         if (error) {
-          console.error("Error inserting candidate", error);
+          console.error("Error creating candidate", error);
           setError("Failed to create candidate.");
           return;
         }
-
-        setInfo("Candidate added to pipeline.");
       }
 
       resetForm();
-      await loadCandidates();
+      await refreshFromSupabase();
     } catch (e) {
       console.error("Unexpected error saving candidate", e);
-      setError("Unexpected error saving candidate.");
+      setError("Unexpected error while saving candidate.");
     }
   }
 
   async function handleDelete(id: string) {
     if (typeof window !== "undefined") {
       const ok = window.confirm(
-        "Delete this candidate from the pipeline? This cannot be undone."
+        "Delete this candidate from the hiring pipeline?"
       );
       if (!ok) return;
     }
 
     try {
       const { error } = await supabase
-        .from("hiring_candidates")
+        .from("hiring_pipeline")
         .delete()
         .eq("id", id);
 
@@ -255,39 +170,34 @@ export default function HiringPage() {
         return;
       }
 
-      setInfo("Candidate deleted.");
-      if (editingId === id) resetForm();
-      await loadCandidates();
+      if (editingId === id) {
+        resetForm();
+      }
+
+      await refreshFromSupabase();
     } catch (e) {
       console.error("Unexpected error deleting candidate", e);
-      setError("Unexpected error deleting candidate.");
+      setError("Unexpected error while deleting candidate.");
     }
   }
 
-  async function moveStage(id: string, newStage: Stage) {
-    setError(null);
-    setInfo(null);
-    const nowIso = new Date().toISOString();
-
+  async function moveStage(id: string, nextStage: CandidateStage) {
     try {
       const { error } = await supabase
-        .from("hiring_candidates")
-        .update({
-          stage: newStage,
-          last_moved_at: nowIso,
-        })
+        .from("hiring_pipeline")
+        .update({ stage: nextStage })
         .eq("id", id);
 
       if (error) {
-        console.error("Error moving candidate stage", error);
-        setError("Failed to move candidate to new stage.");
+        console.error("Error moving candidate to next stage", error);
+        setError("Failed to move candidate.");
         return;
       }
 
-      await loadCandidates();
+      await refreshFromSupabase();
     } catch (e) {
-      console.error("Unexpected error moving candidate stage", e);
-      setError("Unexpected error moving candidate stage.");
+      console.error("Unexpected error moving candidate", e);
+      setError("Unexpected error while moving candidate.");
     }
   }
 
@@ -298,66 +208,26 @@ export default function HiringPage() {
       rows = rows.filter((c) => c.building === filterBuilding);
     }
     if (filterStage !== "ALL") {
-      rows = rows.filter((c) => c.stage === filterStage);
-    }
-    if (showPriorityOnly) {
-      rows = rows.filter((c) => c.isPriority);
+      rows = rows.filter((c) => (c.stage || "Applied") === filterStage);
     }
     if (search.trim()) {
       const q = search.trim().toLowerCase();
-      rows = rows.filter(
-        (c) =>
-          c.fullName.toLowerCase().includes(q) ||
-          c.roleApplied.toLowerCase().includes(q) ||
-          (c.source || "").toLowerCase().includes(q)
-      );
+      rows = rows.filter((c) => {
+        const name = c.name?.toLowerCase() || "";
+        const phone = c.phone?.toLowerCase() || "";
+        const source = c.source?.toLowerCase() || "";
+        return (
+          name.includes(q) || phone.includes(q) || source.includes(q)
+        );
+      });
     }
 
     return rows;
-  }, [candidates, filterBuilding, filterStage, showPriorityOnly, search]);
+  }, [candidates, filterBuilding, filterStage, search]);
 
-  const byStage: Record<Stage, Candidate[]> = useMemo(() => {
-    const map: Record<Stage, Candidate[]> = {
-      Applied: [],
-      "Phone Screen": [],
-      Interview: [],
-      Offer: [],
-      Hired: [],
-      Rejected: [],
-    };
-    for (const c of filteredCandidates) {
-      const s: Stage = STAGES.includes(c.stage) ? c.stage : "Applied";
-      map[s].push(c);
-    }
-    return map;
-  }, [filteredCandidates]);
-
-  const summary = useMemo(() => {
-    const total = candidates.length;
-    const hired = candidates.filter((c) => c.stage === "Hired").length;
-    const rejected = candidates.filter(
-      (c) => c.stage === "Rejected"
-    ).length;
-    const priority = candidates.filter((c) => c.isPriority).length;
-    const experienced = candidates.filter(
-      (c) => c.hasExperience
-    ).length;
-
-    return { total, hired, rejected, priority, experienced };
-  }, [candidates]);
-
-  // Route protection after hooks
-  if (!currentUser) {
-    return (
-      <div className="min-h-screen bg-slate-950 text-slate-400 flex flex-col items-center justify-center text-sm gap-2">
-        <div>Redirecting to login…</div>
-        <a
-          href="/auth"
-          className="text-sky-400 text-xs underline hover:text-sky-300"
-        >
-          Click here if you are not redirected.
-        </a>
-      </div>
+  function candidatesInStage(stage: CandidateStage) {
+    return filteredCandidates.filter(
+      (c) => (c.stage as CandidateStage) === stage
     );
   }
 
@@ -371,8 +241,8 @@ export default function HiringPage() {
               Hiring Pipeline
             </h1>
             <p className="text-sm text-slate-400">
-              Track candidates from applied through hired, with building and
-              role visibility for Precision&apos;s 3PL operations.
+              Track candidates by stage, building, and source. Use this as
+              your visual hiring board for Precision.
             </p>
           </div>
           <Link
@@ -383,48 +253,22 @@ export default function HiringPage() {
           </Link>
         </div>
 
-        {/* Summary row */}
-        <div className="grid grid-cols-1 md:grid-cols-5 gap-4 text-xs">
-          <SummaryCard label="Total Candidates" value={summary.total} />
-          <SummaryCard label="Hired" value={summary.hired} accent="emerald" />
-          <SummaryCard
-            label="Rejected"
-            value={summary.rejected}
-            accent="rose"
-          />
-          <SummaryCard
-            label="Priority Candidates"
-            value={summary.priority}
-            accent="amber"
-          />
-          <SummaryCard
-            label="With Experience"
-            value={summary.experienced}
-            accent="sky"
-          />
-        </div>
-
-        {/* Error/info + loading */}
+        {/* Error / loading */}
         {error && (
           <div className="text-xs text-red-300 bg-red-950/40 border border-red-800 rounded px-3 py-2">
             {error}
           </div>
         )}
-        {info && (
-          <div className="text-xs text-emerald-300 bg-emerald-950/40 border border-emerald-800 rounded px-3 py-2">
-            {info}
-          </div>
-        )}
         {loading && (
           <div className="text-xs text-slate-400">
-            Loading candidates…
+            Loading hiring pipeline…
           </div>
         )}
 
-        {/* Form + filters + Kanban */}
+        {/* Top row: form + filters */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Form */}
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 text-xs space-y-3">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 text-xs space-y-3">
             <div className="flex items-center justify-between mb-1">
               <div className="text-slate-200 text-sm font-semibold">
                 {editingId ? "Edit Candidate" : "Add Candidate"}
@@ -447,13 +291,24 @@ export default function HiringPage() {
                 </label>
                 <input
                   className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
-                  placeholder="Example: John Doe"
-                  value={fullName}
-                  onChange={(e) => setFullName(e.target.value)}
+                  placeholder="Example: Jane Doe"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
                 />
               </div>
 
               <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-[11px] text-slate-400 mb-1">
+                    Phone (optional)
+                  </label>
+                  <input
+                    className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
+                    placeholder="555-123-4567"
+                    value={phone}
+                    onChange={(e) => setPhone(e.target.value)}
+                  />
+                </div>
                 <div>
                   <label className="block text-[11px] text-slate-400 mb-1">
                     Building
@@ -470,22 +325,6 @@ export default function HiringPage() {
                     ))}
                   </select>
                 </div>
-                <div>
-                  <label className="block text-[11px] text-slate-400 mb-1">
-                    Role Applied
-                  </label>
-                  <select
-                    className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
-                    value={roleApplied}
-                    onChange={(e) => setRoleApplied(e.target.value)}
-                  >
-                    {ROLES.map((r) => (
-                      <option key={r} value={r}>
-                        {r}
-                      </option>
-                    ))}
-                  </select>
-                </div>
               </div>
 
               <div className="grid grid-cols-2 gap-2">
@@ -497,7 +336,7 @@ export default function HiringPage() {
                     className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
                     value={stage}
                     onChange={(e) =>
-                      setStage(e.target.value as Stage)
+                      setStage(e.target.value as CandidateStage)
                     }
                   >
                     {STAGES.map((s) => (
@@ -513,71 +352,11 @@ export default function HiringPage() {
                   </label>
                   <input
                     className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
-                    placeholder="Referral, Indeed, internal..."
+                    placeholder="Indeed, referral, etc."
                     value={source}
                     onChange={(e) => setSource(e.target.value)}
                   />
                 </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block text-[11px] text-slate-400 mb-1">
-                    Phone (optional)
-                  </label>
-                  <input
-                    className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
-                    value={phone}
-                    onChange={(e) => setPhone(e.target.value)}
-                  />
-                </div>
-                <div>
-                  <label className="block text-[11px] text-slate-400 mb-1">
-                    Email (optional)
-                  </label>
-                  <input
-                    className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-[11px] text-slate-400 mb-1">
-                  Target Start Date (optional)
-                </label>
-                <input
-                  type="date"
-                  className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
-                  value={targetStartDate}
-                  onChange={(e) => setTargetStartDate(e.target.value)}
-                />
-              </div>
-
-              <div className="flex flex-col gap-2">
-                <label className="inline-flex items-center gap-2 text-[11px] text-slate-400">
-                  <input
-                    type="checkbox"
-                    className="rounded border-slate-600 bg-slate-950"
-                    checked={isPriority}
-                    onChange={(e) =>
-                      setIsPriority(e.target.checked)
-                    }
-                  />
-                  Priority candidate
-                </label>
-                <label className="inline-flex items-center gap-2 text-[11px] text-slate-400">
-                  <input
-                    type="checkbox"
-                    className="rounded border-slate-600 bg-slate-950"
-                    checked={hasExperience}
-                    onChange={(e) =>
-                      setHasExperience(e.target.checked)
-                    }
-                  />
-                  Has relevant experience
-                </label>
               </div>
 
               <div>
@@ -587,7 +366,7 @@ export default function HiringPage() {
                 <textarea
                   rows={3}
                   className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50 resize-none"
-                  placeholder="Interview notes, shift preference, etc."
+                  placeholder="Interview notes, availability, etc."
                   value={notes}
                   onChange={(e) => setNotes(e.target.value)}
                 />
@@ -602,9 +381,8 @@ export default function HiringPage() {
             </form>
           </div>
 
-          {/* Filters + Kanban */}
+          {/* Filters + summary */}
           <div className="lg:col-span-2 space-y-4">
-            {/* Filters */}
             <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 text-xs">
               <div className="flex items-center justify-between mb-3">
                 <div>
@@ -612,7 +390,7 @@ export default function HiringPage() {
                     Filters
                   </div>
                   <div className="text-[11px] text-slate-500">
-                    Narrow by building, stage, priority, or search text.
+                    Filter by building, stage, or search by name/phone.
                   </div>
                 </div>
                 <button
@@ -620,7 +398,6 @@ export default function HiringPage() {
                   onClick={() => {
                     setFilterBuilding("ALL");
                     setFilterStage("ALL");
-                    setShowPriorityOnly(false);
                     setSearch("");
                   }}
                   className="text-[11px] text-sky-300 hover:underline"
@@ -629,7 +406,7 @@ export default function HiringPage() {
                 </button>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                 <div>
                   <label className="block text-[11px] text-slate-400 mb-1">
                     Building
@@ -657,7 +434,7 @@ export default function HiringPage() {
                     className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
                     value={filterStage}
                     onChange={(e) =>
-                      setFilterStage(e.target.value as Stage | "ALL")
+                      setFilterStage(e.target.value)
                     }
                   >
                     <option value="ALL">All Stages</option>
@@ -668,26 +445,13 @@ export default function HiringPage() {
                     ))}
                   </select>
                 </div>
-                <div className="flex items-end">
-                  <label className="inline-flex items-center gap-2 text-[11px] text-slate-400 mb-1">
-                    <input
-                      type="checkbox"
-                      className="rounded border-slate-600 bg-slate-950"
-                      checked={showPriorityOnly}
-                      onChange={(e) =>
-                        setShowPriorityOnly(e.target.checked)
-                      }
-                    />
-                    Priority only
-                  </label>
-                </div>
                 <div>
                   <label className="block text-[11px] text-slate-400 mb-1">
                     Search
                   </label>
                   <input
                     className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
-                    placeholder="Name, role, source..."
+                    placeholder="Name, phone, source..."
                     value={search}
                     onChange={(e) => setSearch(e.target.value)}
                   />
@@ -695,49 +459,92 @@ export default function HiringPage() {
               </div>
             </div>
 
-            {/* Kanban-style columns */}
+            {/* Kanban board by stage */}
             <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 text-xs">
-              <div className="flex items-center justify-between mb-2">
-                <div className="text-slate-200 text-sm font-semibold">
-                  Pipeline (Kanban)
-                </div>
-                <div className="text-[11px] text-slate-500">
-                  Drag & drop is not wired yet, but use the stage buttons
-                  to move candidates.
-                </div>
+              <div className="text-slate-200 text-sm font-semibold mb-3">
+                Hiring Board
               </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-3 xl:grid-cols-6 gap-3">
+              <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-6 gap-3 max-h-[520px] overflow-auto">
                 {STAGES.map((s) => {
-                  const list = byStage[s];
+                  const list = candidatesInStage(s);
                   return (
                     <div
                       key={s}
-                      className="rounded-xl bg-slate-950 border border-slate-800 p-3 flex flex-col gap-2 max-h-[420px] overflow-auto"
+                      className="rounded-xl bg-slate-950 border border-slate-800 p-3 flex flex-col"
                     >
-                      <div className="flex items-center justify-between mb-1">
+                      <div className="flex items-center justify-between mb-2">
                         <div className="text-[11px] font-semibold text-slate-200">
                           {s}
                         </div>
-                        <div className="text-[10px] text-slate-500">
+                        <span className="text-[11px] text-slate-500">
                           {list.length}
-                        </div>
+                        </span>
                       </div>
-                      {list.length === 0 ? (
-                        <div className="text-[11px] text-slate-500">
-                          No candidates in this stage.
-                        </div>
-                      ) : (
-                        list.map((c) => (
-                          <CandidateCard
-                            key={c.id}
-                            c={c}
-                            onEdit={() => handleEdit(c)}
-                            onDelete={() => handleDelete(c.id)}
-                            onMoveStage={moveStage}
-                          />
-                        ))
-                      )}
+                      <div className="space-y-2 overflow-auto">
+                        {list.length === 0 ? (
+                          <div className="text-[11px] text-slate-500">
+                            No candidates.
+                          </div>
+                        ) : (
+                          list.map((c) => (
+                            <div
+                              key={c.id}
+                              className="border border-slate-700 rounded-lg bg-slate-900 p-2 space-y-1"
+                            >
+                              <div className="text-[11px] text-slate-100 font-medium">
+                                {c.name}
+                              </div>
+                              {c.phone && (
+                                <div className="text-[10px] text-slate-400">
+                                  {c.phone}
+                                </div>
+                              )}
+                              {c.source && (
+                                <div className="text-[10px] text-slate-500">
+                                  Source: {c.source}
+                                </div>
+                              )}
+                              {c.building && (
+                                <div className="text-[10px] text-slate-500">
+                                  {c.building}
+                                </div>
+                              )}
+                              <div className="flex flex-wrap gap-1 pt-1 border-t border-slate-800 mt-1">
+                                <button
+                                  type="button"
+                                  onClick={() => startEdit(c)}
+                                  className="text-[10px] text-sky-300 hover:underline"
+                                >
+                                  Edit
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    handleDelete(c.id)
+                                  }
+                                  className="text-[10px] text-rose-300 hover:underline"
+                                >
+                                  Delete
+                                </button>
+                                {STAGES.filter(
+                                  (next) => next !== s
+                                ).map((next) => (
+                                  <button
+                                    key={next}
+                                    type="button"
+                                    onClick={() =>
+                                      moveStage(c.id, next)
+                                    }
+                                    className="text-[9px] text-slate-400 hover:text-emerald-300"
+                                  >
+                                    → {next}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          ))
+                        )}
+                      </div>
                     </div>
                   );
                 })}
@@ -745,115 +552,6 @@ export default function HiringPage() {
             </div>
           </div>
         </div>
-      </div>
-    </div>
-  );
-}
-
-function SummaryCard({
-  label,
-  value,
-  accent,
-}: {
-  label: string;
-  value: number;
-  accent?: "emerald" | "rose" | "amber" | "sky";
-}) {
-  const color =
-    accent === "emerald"
-      ? "text-emerald-300"
-      : accent === "rose"
-      ? "text-rose-300"
-      : accent === "amber"
-      ? "text-amber-300"
-      : accent === "sky"
-      ? "text-sky-300"
-      : "text-sky-300";
-
-  return (
-    <div className="rounded-2xl bg-slate-900 border border-slate-800 p-4">
-      <div className="text-xs text-slate-400 mb-1">{label}</div>
-      <div className={`text-2xl font-semibold ${color}`}>{value}</div>
-    </div>
-  );
-}
-
-function CandidateCard({
-  c,
-  onEdit,
-  onDelete,
-  onMoveStage,
-}: {
-  c: Candidate;
-  onEdit: () => void;
-  onDelete: () => void;
-  onMoveStage: (id: string, newStage: Stage) => void;
-}) {
-  const isTerminal = c.stage === "Hired" || c.stage === "Rejected";
-
-  return (
-    <div className="rounded-lg border border-slate-800 bg-slate-900/80 p-2 space-y-1">
-      <div className="flex items-center justify-between gap-2">
-        <div className="text-[11px] font-semibold text-slate-100 line-clamp-1">
-          {c.fullName}
-        </div>
-        {c.isPriority && (
-          <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-amber-900/70 text-amber-200 border border-amber-700/70">
-            Priority
-          </span>
-        )}
-      </div>
-      <div className="text-[10px] text-slate-400">
-        {c.roleApplied} • {c.building}
-      </div>
-      {c.source && (
-        <div className="text-[10px] text-slate-500">
-          Source: {c.source}
-        </div>
-      )}
-      {c.targetStartDate && (
-        <div className="text-[10px] text-slate-500">
-          Target Start: {c.targetStartDate}
-        </div>
-      )}
-      {c.notes && (
-        <div className="text-[10px] text-slate-500 line-clamp-2">
-          {c.notes}
-        </div>
-      )}
-
-      <div className="flex items-center justify-between mt-1">
-        <div className="inline-flex gap-1">
-          <button
-            type="button"
-            onClick={onEdit}
-            className="text-[10px] text-sky-300 hover:underline"
-          >
-            Edit
-          </button>
-          <button
-            type="button"
-            onClick={onDelete}
-            className="text-[10px] text-rose-300 hover:underline"
-          >
-            Delete
-          </button>
-        </div>
-        {!isTerminal && (
-          <select
-            className="text-[10px] rounded bg-slate-950 border border-slate-700 px-1.5 py-0.5 text-slate-200"
-            value={c.stage}
-            onChange={(e) =>
-              onMoveStage(c.id, e.target.value as Stage)
-            }
-          >
-            {STAGES.map((s) => (
-              <option key={s} value={s}>
-                {s}
-              </option>
-            ))}
-          </select>
-        )}
       </div>
     </div>
   );
