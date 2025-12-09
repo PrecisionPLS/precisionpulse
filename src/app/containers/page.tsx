@@ -1,63 +1,43 @@
 "use client";
 
-import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, FormEvent } from "react";
+import { supabase } from "@/lib/supabaseClient";
+import { useCurrentUser } from "@/lib/useCurrentUser";
+import { useRouter } from "next/navigation";
 
 const CONTAINERS_KEY = "precisionpulse_containers";
-const WORK_ORDERS_KEY = "precisionpulse_work_orders";
-const WORKFORCE_KEY = "precisionpulse_workforce";
-
 const BUILDINGS = ["DC1", "DC5", "DC11", "DC14", "DC18"];
-const SHIFTS = ["1st", "2nd", "3rd", "4th"];
 
-type WorkOrderStatus = "Pending" | "Active" | "Completed" | "Locked";
-
-type WorkOrder = {
-  id: string;
-  code: string;
-  building: string;
-  shift: string;
-  status: WorkOrderStatus;
-  createdAt: string;
-};
-
-type WorkerAssignment = {
-  id: string;
-  workerId: string; // link to workforce
-  workerName: string;
-  role?: string;
+// Shape we store inside Supabase "workers" JSON
+type WorkerContribution = {
+  name: string;
   minutesWorked: number;
   percentContribution: number;
   payout: number;
 };
 
-type ContainerRecord = {
+type ContainerRow = {
   id: string;
-  workOrderId?: string;
+  created_at: string;
   building: string;
-  shift: string;
+  container_no: string;
+  pieces_total: number;
+  skus_total: number;
+  pay_total: number;
+  workers: WorkerContribution[];
+  damage_pieces: number;
+  rework_pieces: number;
+};
+
+type EditFormState = {
+  id?: string;
+  building: string;
   containerNo: string;
   piecesTotal: number;
   skusTotal: number;
-  containerPayTotal: number;
-  createdAt: string;
-  workers: WorkerAssignment[];
+  workers: WorkerContribution[];
 };
 
-type WorkerFormRow = {
-  workerId: string;
-  minutesWorked: string;
-  percentContribution: string;
-};
-
-type WorkforcePerson = {
-  id: string;
-  name: string;
-  role?: string;
-  building?: string;
-};
-
-// ---- PAY SCALE ----
 function calculateContainerPay(pieces: number): number {
   if (pieces <= 0) return 0;
   if (pieces <= 500) return 100;
@@ -65,1153 +45,740 @@ function calculateContainerPay(pieces: number): number {
   if (pieces <= 3500) return 180;
   if (pieces <= 5500) return 230;
   if (pieces <= 7500) return 280;
-  return 280 + 0.05 * (pieces - 7500);
-}
-
-// Normalize any old container records in localStorage
-function normalizeContainer(raw: any): ContainerRecord {
-  const pieces = Number(raw?.piecesTotal ?? 0) || 0;
-  const skus = Number(raw?.skusTotal ?? 0) || 0;
-
-  const pay =
-    typeof raw?.containerPayTotal === "number"
-      ? raw.containerPayTotal
-      : calculateContainerPay(pieces);
-
-  const workersRaw: any[] = Array.isArray(raw?.workers)
-    ? raw.workers
-    : [];
-
-  const workers: WorkerAssignment[] = workersRaw.map((w, idx) => ({
-    id: String(w.id ?? `worker-${idx}-${raw?.id ?? Date.now()}`),
-    workerId: String(w.workerId ?? ""),
-    workerName: String(w.workerName ?? w.name ?? ""),
-    role: w.role ?? "",
-    minutesWorked: Number(w.minutesWorked ?? 0) || 0,
-    percentContribution: Number(w.percentContribution ?? 0) || 0,
-    payout: Number(w.payout ?? 0) || 0,
-  }));
-
-  return {
-    id: String(raw?.id ?? Date.now()),
-    workOrderId: raw?.workOrderId,
-    building: raw?.building ?? "DC1",
-    shift: raw?.shift ?? "1st",
-    containerNo: raw?.containerNo ?? "",
-    piecesTotal: pieces,
-    skusTotal: skus,
-    containerPayTotal: pay,
-    createdAt: raw?.createdAt ?? new Date().toISOString(),
-    workers,
-  };
-}
-
-// Normalize workforce data from Workforce page
-function normalizeWorkforce(raw: any[]): WorkforcePerson[] {
-  if (!Array.isArray(raw)) return [];
-  return raw.map((w) => ({
-    id: String(w.id ?? w.workerId ?? w.email ?? w.name ?? ""),
-    name: String(w.fullName ?? w.name ?? w.displayName ?? w.email ?? "Unknown"),
-    role: w.role ?? w.position ?? "",
-    building: w.building ?? w.assignedBuilding ?? "",
-  }));
+  // 7501+ → 280 + ($0.05 × pieces above 7500)
+  const extra = pieces - 7500;
+  return 280 + extra * 0.05;
 }
 
 export default function ContainersPage() {
-  const [containers, setContainers] = useState<ContainerRecord[]>([]);
-  const [workOrders, setWorkOrders] = useState<WorkOrder[]>([]);
-  const [workforce, setWorkforce] = useState<WorkforcePerson[]>([]);
+  const currentUser = useCurrentUser();
+  const router = useRouter();
 
-  // Create container form
-  const [building, setBuilding] = useState(BUILDINGS[0]);
-  const [shift, setShift] = useState(SHIFTS[0]);
-  const [containerNo, setContainerNo] = useState("");
-  const [piecesTotal, setPiecesTotal] = useState("");
-  const [skusTotal, setSkusTotal] = useState("");
-  const [workOrderId, setWorkOrderId] = useState<string>("");
+  const [buildingFilter, setBuildingFilter] = useState<string>("ALL");
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  // Lumpers on CREATE (up to 4 rows)
-  const [createWorkers, setCreateWorkers] = useState<WorkerFormRow[]>([
-    { workerId: "", minutesWorked: "", percentContribution: "" },
-    { workerId: "", minutesWorked: "", percentContribution: "" },
-    { workerId: "", minutesWorked: "", percentContribution: "" },
-    { workerId: "", minutesWorked: "", percentContribution: "" },
-  ]);
-
-  // Filters
-  const [filterBuilding, setFilterBuilding] = useState<string>("ALL");
-  const [filterWorkOrder, setFilterWorkOrder] = useState<string>("ALL");
-
-  // Editing existing container’s workers
-  const [editingContainerId, setEditingContainerId] = useState<string | null>(
-    null
-  );
-  const [editWorkers, setEditWorkers] = useState<WorkerFormRow[]>([]);
-
-  // NEW: editing container info (number, pieces, etc.)
-  const [editingInfoId, setEditingInfoId] = useState<string | null>(null);
-  const [editInfo, setEditInfo] = useState<{
-    containerNo: string;
-    piecesTotal: string;
-    skusTotal: string;
-    building: string;
-    shift: string;
-    workOrderId: string;
-  }>({
+  const [containers, setContainers] = useState<ContainerRow[]>([]);
+  const [showForm, setShowForm] = useState(false);
+  const [formState, setFormState] = useState<EditFormState>({
+    building: "DC18",
     containerNo: "",
-    piecesTotal: "",
-    skusTotal: "",
-    building: BUILDINGS[0],
-    shift: SHIFTS[0],
-    workOrderId: "",
+    piecesTotal: 0,
+    skusTotal: 0,
+    workers: [
+      { name: "", minutesWorked: 0, percentContribution: 0, payout: 0 },
+      { name: "", minutesWorked: 0, percentContribution: 0, payout: 0 },
+      { name: "", minutesWorked: 0, percentContribution: 0, payout: 0 },
+      { name: "", minutesWorked: 0, percentContribution: 0, payout: 0 },
+    ],
   });
 
-  const [workerError, setWorkerError] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [infoError, setInfoError] = useState<string | null>(null);
-
-  // ---- LOAD DATA ----
+  // Load containers from Supabase (and sync to localStorage) after we know auth state
   useEffect(() => {
-    if (typeof window === "undefined") return;
+    if (!currentUser) return; // don't load until we know user
 
-    try {
-      const raw = window.localStorage.getItem(CONTAINERS_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        const normalized = Array.isArray(parsed)
-          ? parsed.map(normalizeContainer)
-          : [];
-        setContainers(normalized);
-      }
-    } catch (e) {
-      console.error("Failed to load containers", e);
-    }
+    async function loadContainers() {
+      setLoading(true);
+      setError(null);
+      try {
+        const { data, error } = await supabase
+          .from("containers")
+          .select("*")
+          .order("created_at", { ascending: false });
 
-    try {
-      const raw = window.localStorage.getItem(WORK_ORDERS_KEY);
-      if (raw) setWorkOrders(JSON.parse(raw));
-    } catch (e) {
-      console.error("Failed to load work orders", e);
-    }
+        if (error) {
+          console.error("Error loading containers", error);
+          setError("Failed to load containers from server.");
+          return;
+        }
 
-    try {
-      const raw = window.localStorage.getItem(WORKFORCE_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        setWorkforce(normalizeWorkforce(parsed));
-      }
-    } catch (e) {
-      console.error("Failed to load workforce", e);
-    }
-  }, []);
+        const rows: ContainerRow[] =
+          (data as any as ContainerRow[])?.map((row) => ({
+            ...row,
+            workers: (row.workers || []) as WorkerContribution[],
+          })) ?? [];
 
-  function saveContainers(next: ContainerRecord[]) {
-    setContainers(next);
-    if (typeof window !== "undefined") {
-      window.localStorage.setItem(CONTAINERS_KEY, JSON.stringify(next));
-    }
-  }
+        setContainers(rows);
 
-  // ---- HELPERS ----
-  function workOrderLabel(id?: string) {
-    if (!id) return "Unassigned";
-    const wo = workOrders.find((w) => w.id === id);
-    if (!wo) return "Unknown WO";
-    return `${wo.code} • ${wo.building} • ${wo.shift}`;
-  }
-
-  function findWorkforcePersonById(
-    id: string | undefined
-  ): WorkforcePerson | undefined {
-    if (!id) return undefined;
-    return workforce.find((w) => w.id === id);
-  }
-
-  function computeTotalPercentFromRows(rows: WorkerFormRow[]): number {
-    return rows.reduce((sum, row) => {
-      const p = Number(row.percentContribution || "0") || 0;
-      return sum + p;
-    }, 0);
-  }
-
-  // ---- CREATE CONTAINER (WITH LUMPERS) ----
-  function handleCreateContainer(e: any) {
-    e.preventDefault();
-    setError(null);
-    setWorkerError(null);
-    setInfoError(null);
-
-    if (!containerNo.trim()) {
-      setError("Container number is required.");
-      return;
-    }
-
-    const pieces = parseInt(piecesTotal || "0", 10);
-    const skus = parseInt(skusTotal || "0", 10);
-    if (!pieces || pieces <= 0) {
-      setError("Pieces must be a positive number.");
-      return;
-    }
-    if (!skus || skus <= 0) {
-      setError("SKUs must be a positive number.");
-      return;
-    }
-
-    const payTotal = calculateContainerPay(pieces);
-
-    // Build workers from createWorkers rows
-    const cleanedRows = createWorkers
-      .map((row) => ({
-        workerId: row.workerId.trim(),
-        minutesWorked: row.minutesWorked.trim(),
-        percentContribution: row.percentContribution.trim(),
-      }))
-      .filter(
-        (row) =>
-          row.workerId ||
-          row.minutesWorked ||
-          row.percentContribution
-      );
-
-    let workers: WorkerAssignment[] = [];
-    if (cleanedRows.length > 0) {
-      const totalPercent = computeTotalPercentFromRows(cleanedRows);
-      if (totalPercent !== 100) {
-        setWorkerError(
-          "Contribution percentages must add up to exactly 100% for assigned workers."
-        );
-        return;
-      }
-
-      workers = cleanedRows
-        .map((row, idx) => {
-          const person = findWorkforcePersonById(row.workerId);
-          if (!person) return null;
-
-          const minutes = Number(row.minutesWorked || "0") || 0;
-          const percent = Number(row.percentContribution || "0") || 0;
-
-          return {
-            id: `new-${Date.now()}-${idx}`,
-            workerId: person.id,
-            workerName: person.name,
-            role: person.role ?? "",
-            minutesWorked: minutes,
-            percentContribution: percent,
-            payout: (percent / 100) * payTotal,
-          } as WorkerAssignment;
-        })
-        .filter(Boolean) as WorkerAssignment[];
-
-      if (workers.length === 0) {
-        setWorkerError(
-          "Selected workers must exist in Workforce. Please add them to Workforce first."
-        );
-        return;
+        // Also sync into localStorage so Dashboard/Reports still work
+        try {
+          const mappedForLocal = rows.map((row) => ({
+            id: row.id,
+            building: row.building,
+            createdAt: row.created_at,
+            containerNo: row.container_no,
+            piecesTotal: row.pieces_total,
+            skusTotal: row.skus_total,
+            containerPayTotal: row.pay_total,
+            workers: row.workers || [],
+          }));
+          if (typeof window !== "undefined") {
+            window.localStorage.setItem(
+              CONTAINERS_KEY,
+              JSON.stringify(mappedForLocal)
+            );
+          }
+        } catch (e) {
+          console.error("Failed to write containers to localStorage", e);
+        }
+      } catch (e) {
+        console.error("Unexpected error loading containers", e);
+        setError("Unexpected error loading containers.");
+      } finally {
+        setLoading(false);
       }
     }
 
-    const now = new Date().toISOString();
+    loadContainers();
+  }, [currentUser]);
 
-    const newContainer: ContainerRecord = {
-      id: `${Date.now()}`,
-      workOrderId: workOrderId || undefined,
-      building,
-      shift,
-      containerNo: containerNo.trim(),
-      piecesTotal: pieces,
-      skusTotal: skus,
-      containerPayTotal: payTotal,
-      createdAt: now,
-      workers,
-    };
-
-    const next = [newContainer, ...containers];
-    saveContainers(next);
-
-    // reset container fields
-    setContainerNo("");
-    setPiecesTotal("");
-    setSkusTotal("");
-    // keep building/shift/workOrder
-
-    // reset worker rows
-    setCreateWorkers([
-      { workerId: "", minutesWorked: "", percentContribution: "" },
-      { workerId: "", minutesWorked: "", percentContribution: "" },
-      { workerId: "", minutesWorked: "", percentContribution: "" },
-      { workerId: "", minutesWorked: "", percentContribution: "" },
-    ]);
-  }
-
-  function updateCreateWorkerRow(
-    index: number,
-    field: keyof WorkerFormRow,
-    value: string
-  ) {
-    setCreateWorkers((prev) => {
-      const next = [...prev];
-      next[index] = { ...next[index], [field]: value };
-      return next;
-    });
-  }
-
-  // ---- FILTERED LIST ----
   const filteredContainers = useMemo(() => {
-    return containers.filter((c) => {
-      if (filterBuilding !== "ALL" && c.building !== filterBuilding) {
-        return false;
-      }
-      if (
-        filterWorkOrder !== "ALL" &&
-        (c.workOrderId || "NONE") !== filterWorkOrder
-      ) {
-        return false;
-      }
-      return true;
+    if (buildingFilter === "ALL") return containers;
+    return containers.filter((c) => c.building === buildingFilter);
+  }, [containers, buildingFilter]);
+
+  const totalPieces = useMemo(
+    () =>
+      filteredContainers.reduce((sum, c) => {
+        return sum + (c.pieces_total || 0);
+      }, 0),
+    [filteredContainers]
+  );
+
+  const totalPay = useMemo(
+    () =>
+      filteredContainers.reduce((sum, c) => {
+        return sum + (Number(c.pay_total) || 0);
+      }, 0),
+    [filteredContainers]
+  );
+
+  function resetForm() {
+    setFormState({
+      building: currentUser?.building || "DC18",
+      containerNo: "",
+      piecesTotal: 0,
+      skusTotal: 0,
+      workers: [
+        { name: "", minutesWorked: 0, percentContribution: 0, payout: 0 },
+        { name: "", minutesWorked: 0, percentContribution: 0, payout: 0 },
+        { name: "", minutesWorked: 0, percentContribution: 0, payout: 0 },
+        { name: "", minutesWorked: 0, percentContribution: 0, payout: 0 },
+      ],
     });
-  }, [containers, filterBuilding, filterWorkOrder]);
-
-  // ---- EDIT EXISTING CONTAINER WORKERS (ALSO USE WORKFORCE) ----
-  function startEditingContainer(container: ContainerRecord) {
-    setWorkerError(null);
-    setEditingContainerId(container.id);
-
-    if (container.workers && container.workers.length > 0) {
-      const rows: WorkerFormRow[] = container.workers.map((w) => ({
-        workerId: w.workerId || "",
-        minutesWorked: String(w.minutesWorked || ""),
-        percentContribution: String(w.percentContribution || ""),
-      }));
-      while (rows.length < 4) {
-        rows.push({
-          workerId: "",
-          minutesWorked: "",
-          percentContribution: "",
-        });
-      }
-      setEditWorkers(rows);
-    } else {
-      setEditWorkers([
-        { workerId: "", minutesWorked: "", percentContribution: "" },
-        { workerId: "", minutesWorked: "", percentContribution: "" },
-        { workerId: "", minutesWorked: "", percentContribution: "" },
-        { workerId: "", minutesWorked: "", percentContribution: "" },
-      ]);
-    }
   }
 
-  function updateEditWorkerRow(
+  function openNewForm() {
+    resetForm();
+    setShowForm(true);
+  }
+
+  function openEditForm(row: ContainerRow) {
+    setFormState({
+      id: row.id,
+      building: row.building,
+      containerNo: row.container_no,
+      piecesTotal: row.pieces_total,
+      skusTotal: row.skus_total,
+      workers: (row.workers || []).concat(
+        Array(Math.max(0, 4 - (row.workers?.length || 0))).fill({
+          name: "",
+          minutesWorked: 0,
+          percentContribution: 0,
+          payout: 0,
+        })
+      ).slice(0, 4),
+    });
+    setShowForm(true);
+  }
+
+  function handleWorkerChange(
     index: number,
-    field: keyof WorkerFormRow,
+    field: keyof WorkerContribution,
     value: string
   ) {
-    setEditWorkers((prev) => {
-      const next = [...prev];
-      next[index] = { ...next[index], [field]: value };
-      return next;
+    setFormState((prev) => {
+      const workers = [...prev.workers];
+      const w = { ...workers[index] };
+
+      if (field === "minutesWorked") {
+        w.minutesWorked = Number(value) || 0;
+      } else if (field === "percentContribution") {
+        w.percentContribution = Number(value) || 0;
+      } else if (field === "name") {
+        w.name = value;
+      }
+      workers[index] = w;
+      return { ...prev, workers };
     });
   }
 
-  function computeDisplayPercentForContainer(c: ContainerRecord): number {
-    if (editingContainerId === c.id) {
-      return computeTotalPercentFromRows(editWorkers);
-    }
-    if (!c.workers || c.workers.length === 0) return 0;
-    return c.workers.reduce(
+  const { payForForm, workersWithPayout, percentSum } = useMemo(() => {
+    const pieces = formState.piecesTotal || 0;
+    const pay = calculateContainerPay(pieces);
+
+    const workers = (formState.workers || []).map((w) => {
+      const pct = w.percentContribution || 0;
+      const payout = (pay * pct) / 100;
+      return {
+        ...w,
+        payout,
+      };
+    });
+
+    const sumPct = workers.reduce(
       (sum, w) => sum + (w.percentContribution || 0),
       0
     );
-  }
 
-  function handleSaveWorkers(container: ContainerRecord) {
-    setWorkerError(null);
+    return {
+      payForForm: pay,
+      workersWithPayout: workers,
+      percentSum: sumPct,
+    };
+  }, [formState.piecesTotal, formState.workers]);
 
-    if (editingContainerId !== container.id) return;
+  const isPercentValid = percentSum === 100 || percentSum === 0;
 
-    const cleanedRows = editWorkers
-      .map((row) => ({
-        workerId: row.workerId.trim(),
-        minutesWorked: row.minutesWorked.trim(),
-        percentContribution: row.percentContribution.trim(),
-      }))
-      .filter(
-        (row) =>
-          row.workerId ||
-          row.minutesWorked ||
-          row.percentContribution
-      );
+  async function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    if (saving) return;
 
-    if (cleanedRows.length === 0) {
-      // Clear workers
-      const updated: ContainerRecord = {
-        ...container,
-        workers: [],
-        containerPayTotal: calculateContainerPay(container.piecesTotal),
+    setError(null);
+
+    if (!formState.containerNo.trim()) {
+      setError("Container number is required.");
+      return;
+    }
+    if (formState.piecesTotal <= 0) {
+      setError("Pieces total must be greater than 0.");
+      return;
+    }
+
+    // Filter out empty workers
+    const finalWorkers = workersWithPayout.filter(
+      (w) => w.name.trim() && w.percentContribution > 0
+    );
+
+    if (finalWorkers.length > 0 && !isPercentValid) {
+      setError("Worker contribution percentages must total exactly 100%.");
+      return;
+    }
+
+    setSaving(true);
+
+    try {
+      const payload = {
+        building: formState.building,
+        container_no: formState.containerNo.trim(),
+        pieces_total: formState.piecesTotal,
+        skus_total: formState.skusTotal,
+        pay_total: payForForm,
+        damage_pieces: 0,
+        rework_pieces: 0,
+        workers: finalWorkers,
       };
-      const next = containers.map((c) =>
-        c.id === container.id ? updated : c
-      );
-      saveContainers(next);
-      return;
+
+      if (formState.id) {
+        const { error } = await supabase
+          .from("containers")
+          .update(payload)
+          .eq("id", formState.id);
+
+        if (error) {
+          console.error("Error updating container", error);
+          setError("Failed to update container.");
+          return;
+        }
+      } else {
+        const { error } = await supabase.from("containers").insert(payload);
+        if (error) {
+          console.error("Error inserting container", error);
+          setError("Failed to create container.");
+          return;
+        }
+      }
+
+      // Reload from Supabase and sync localStorage
+      const { data, error: loadError } = await supabase
+        .from("containers")
+        .select("*")
+        .order("created_at", { ascending: false });
+
+      if (loadError) {
+        console.error("Error reloading containers", loadError);
+      } else {
+        const rows: ContainerRow[] =
+          (data as any as ContainerRow[])?.map((row) => ({
+            ...row,
+            workers: (row.workers || []) as WorkerContribution[],
+          })) ?? [];
+        setContainers(rows);
+
+        try {
+          const mappedForLocal = rows.map((row) => ({
+            id: row.id,
+            building: row.building,
+            createdAt: row.created_at,
+            containerNo: row.container_no,
+            piecesTotal: row.pieces_total,
+            skusTotal: row.skus_total,
+            containerPayTotal: row.pay_total,
+            workers: row.workers || [],
+          }));
+          if (typeof window !== "undefined") {
+            window.localStorage.setItem(
+              CONTAINERS_KEY,
+              JSON.stringify(mappedForLocal)
+            );
+          }
+        } catch (e) {
+          console.error("Failed to write containers to localStorage", e);
+        }
+      }
+
+      setShowForm(false);
+      resetForm();
+    } catch (e) {
+      console.error("Unexpected error saving container", e);
+      setError("Unexpected error saving container.");
+    } finally {
+      setSaving(false);
     }
+  }
 
-    const totalPercent = computeTotalPercentFromRows(cleanedRows);
-    if (totalPercent !== 100) {
-      setWorkerError(
-        "Contribution percentages must add up to exactly 100% before saving."
-      );
-      return;
+  async function handleDelete(id: string) {
+    if (!confirm("Delete this container? This cannot be undone.")) return;
+    setSaving(true);
+    setError(null);
+
+    try {
+      const { error } = await supabase.from("containers").delete().eq("id", id);
+      if (error) {
+        console.error("Error deleting container", error);
+        setError("Failed to delete container.");
+        return;
+      }
+
+      const updated = containers.filter((c) => c.id !== id);
+      setContainers(updated);
+
+      // Sync localStorage after delete
+      try {
+        const mappedForLocal = updated.map((row) => ({
+          id: row.id,
+          building: row.building,
+          createdAt: row.created_at,
+          containerNo: row.container_no,
+          piecesTotal: row.pieces_total,
+          skusTotal: row.skus_total,
+          containerPayTotal: row.pay_total,
+          workers: row.workers || [],
+        }));
+        if (typeof window !== "undefined") {
+          window.localStorage.setItem(
+            CONTAINERS_KEY,
+            JSON.stringify(mappedForLocal)
+          );
+        }
+      } catch (e) {
+        console.error("Failed to write containers to localStorage", e);
+      }
+    } catch (e) {
+      console.error("Unexpected error deleting container", e);
+      setError("Unexpected error deleting container.");
+    } finally {
+      setSaving(false);
     }
+  }
 
-    const payTotal = calculateContainerPay(container.piecesTotal);
-
-    const workers: WorkerAssignment[] = [];
-    cleanedRows.forEach((row, idx) => {
-      const person = findWorkforcePersonById(row.workerId);
-      if (!person) return;
-
-      const minutes = Number(row.minutesWorked || "0") || 0;
-      const percent = Number(row.percentContribution || "0") || 0;
-
-      workers.push({
-        id: `${container.id}-worker-${idx}`,
-        workerId: person.id,
-        workerName: person.name,
-        role: person.role ?? "",
-        minutesWorked: minutes,
-        percentContribution: percent,
-        payout: (percent / 100) * payTotal,
-      });
-    });
-
-    if (workers.length === 0) {
-      setWorkerError(
-        "All selected workers must exist in Workforce. Add them there first."
-      );
-      return;
-    }
-
-    const updated: ContainerRecord = {
-      ...container,
-      workers,
-      containerPayTotal: payTotal,
-    };
-
-    const next = containers.map((c) =>
-      c.id === container.id ? updated : c
+  // 🔒 Protect route AFTER all hooks, so we don't break hook order
+  if (!currentUser) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-400 flex flex-col items-center justify-center text-sm gap-2">
+        <div>Redirecting to login…</div>
+        <a
+          href="/auth"
+          className="text-sky-400 text-xs underline hover:text-sky-300"
+        >
+          Click here if you are not redirected.
+        </a>
+      </div>
     );
-    saveContainers(next);
   }
-
-  // ---- NEW: EDIT CONTAINER INFO (NUMBER, PIECES, SKUS, BUILDING, SHIFT, WO) ----
-  function startEditContainerInfo(container: ContainerRecord) {
-    setInfoError(null);
-    setEditingInfoId(container.id);
-    setEditInfo({
-      containerNo: container.containerNo,
-      piecesTotal: String(container.piecesTotal || ""),
-      skusTotal: String(container.skusTotal || ""),
-      building: container.building,
-      shift: container.shift,
-      workOrderId: container.workOrderId || "",
-    });
-  }
-
-  function handleSaveContainerInfo(container: ContainerRecord) {
-    setInfoError(null);
-
-    if (editingInfoId !== container.id) return;
-
-    if (!editInfo.containerNo.trim()) {
-      setInfoError("Container number is required.");
-      return;
-    }
-
-    const pieces = parseInt(editInfo.piecesTotal || "0", 10);
-    const skus = parseInt(editInfo.skusTotal || "0", 10);
-    if (!pieces || pieces <= 0) {
-      setInfoError("Pieces must be a positive number.");
-      return;
-    }
-    if (!skus || skus <= 0) {
-      setInfoError("SKUs must be a positive number.");
-      return;
-    }
-
-    const payTotal = calculateContainerPay(pieces);
-
-    // Recalculate payouts for existing workers with new container pay
-    const updatedWorkers = (container.workers || []).map((w) => ({
-      ...w,
-      payout: (w.percentContribution / 100) * payTotal,
-    }));
-
-    const updated: ContainerRecord = {
-      ...container,
-      containerNo: editInfo.containerNo.trim(),
-      piecesTotal: pieces,
-      skusTotal: skus,
-      building: editInfo.building,
-      shift: editInfo.shift,
-      workOrderId: editInfo.workOrderId || undefined,
-      containerPayTotal: payTotal,
-      workers: updatedWorkers,
-    };
-
-    const next = containers.map((c) =>
-      c.id === container.id ? updated : c
-    );
-    saveContainers(next);
-    setEditingInfoId(null);
-  }
-
-  function handleDeleteContainer(containerId: string) {
-    setInfoError(null);
-    setWorkerError(null);
-
-    if (typeof window !== "undefined") {
-      const ok = window.confirm(
-        "Are you sure you want to delete this container and all its payouts?"
-      );
-      if (!ok) return;
-    }
-
-    const next = containers.filter((c) => c.id !== containerId);
-    saveContainers(next);
-
-    if (editingContainerId === containerId) setEditingContainerId(null);
-    if (editingInfoId === containerId) setEditingInfoId(null);
-  }
-
-  // Workforce dropdown options
-  const workforceOptions = workforce;
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-semibold text-slate-50">
-            Containers & Lumpers
-          </h1>
-          <p className="text-sm text-slate-400">
-            Create containers, link them to work orders, assign lumpers
-            from Workforce, and edit or delete containers when needed.
-          </p>
+    <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-950 to-slate-900 text-slate-50">
+      <div className="mx-auto max-w-6xl px-4 py-6 space-y-6">
+        {/* Header */}
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h1 className="text-2xl font-semibold text-slate-50">
+              Containers
+            </h1>
+            <p className="text-sm text-slate-400">
+              Live container tracking with automatic pay scale and worker
+              contributions.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => router.push("/")}
+              className="rounded-lg border border-slate-700 px-3 py-1.5 text-[11px] text-slate-200 hover:bg-slate-800"
+            >
+              ← Back to Dashboard
+            </button>
+            <button
+              onClick={openNewForm}
+              className="rounded-lg bg-sky-600 hover:bg-sky-500 text-[11px] font-medium text-white px-4 py-2"
+            >
+              + New Container
+            </button>
+          </div>
         </div>
-        <Link
-          href="/"
-          className="text-xs px-3 py-1 rounded-full border border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800"
-        >
-          ← Back to Dashboard
-        </Link>
-      </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Create container + assign lumpers */}
-        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4">
-          <h2 className="text-sm font-semibold text-slate-100">
-            Add Container & Assign Lumpers
-          </h2>
-          {error && (
-            <div className="text-xs text-red-300 bg-red-950/40 border border-red-800 rounded px-3 py-2">
-              {error}
+        {/* Filters + summary */}
+        <div className="flex flex-wrap items-center justify-between gap-3 text-xs">
+          <div className="flex items-center gap-2">
+            <span className="text-slate-500">Building:</span>
+            <select
+              className="rounded-lg bg-slate-900 border border-slate-700 px-3 py-1.5 text-xs text-slate-50"
+              value={buildingFilter}
+              onChange={(e) => setBuildingFilter(e.target.value)}
+            >
+              <option value="ALL">All Buildings</option>
+              {BUILDINGS.map((b) => (
+                <option key={b} value={b}>
+                  {b}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="flex flex-wrap gap-4">
+            <div className="text-slate-400">
+              Containers:{" "}
+              <span className="text-slate-100">
+                {filteredContainers.length}
+              </span>
             </div>
-          )}
-          {workerError && (
-            <div className="text-xs text-red-300 bg-red-950/40 border border-red-800 rounded px-3 py-2">
-              {workerError}
+            <div className="text-slate-400">
+              Total Pieces:{" "}
+              <span className="text-slate-100">{totalPieces}</span>
             </div>
-          )}
-          <form
-            onSubmit={handleCreateContainer}
-            className="space-y-3 text-sm"
-          >
-            <div>
-              <label className="block text-xs text-slate-300 mb-1">
-                Container Number
-              </label>
-              <input
-                className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2 text-sm text-slate-50"
-                value={containerNo}
-                onChange={(e) => setContainerNo(e.target.value)}
-                placeholder="e.g. MSKU1234567"
-              />
+            <div className="text-slate-400">
+              Total Pay:{" "}
+              <span className="text-emerald-300">
+                ${totalPay.toFixed(2)}
+              </span>
             </div>
+          </div>
+        </div>
 
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="block text-xs text-slate-300 mb-1">
-                  Pieces Total
-                </label>
-                <input
-                  type="number"
-                  min={1}
-                  className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2 text-sm text-slate-50"
-                  value={piecesTotal}
-                  onChange={(e) => setPiecesTotal(e.target.value)}
-                  placeholder="e.g. 3600"
-                />
-              </div>
-              <div>
-                <label className="block text-xs text-slate-300 mb-1">
-                  SKUs Total
-                </label>
-                <input
-                  type="number"
-                  min={1}
-                  className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2 text-sm text-slate-50"
-                  value={skusTotal}
-                  onChange={(e) => setSkusTotal(e.target.value)}
-                  placeholder="e.g. 45"
-                />
-              </div>
-            </div>
+        {error && (
+          <div className="rounded-lg border border-rose-700 bg-rose-950/40 px-3 py-2 text-[11px] text-rose-100">
+            {error}
+          </div>
+        )}
 
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="block text-xs text-slate-300 mb-1">
-                  Building
-                </label>
-                <select
-                  className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2 text-sm text-slate-50"
-                  value={building}
-                  onChange={(e) => setBuilding(e.target.value)}
-                >
-                  {BUILDINGS.map((b) => (
-                    <option key={b} value={b}>
-                      {b}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="block text-xs text-slate-300 mb-1">
-                  Shift
-                </label>
-                <select
-                  className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2 text-sm text-slate-50"
-                  value={shift}
-                  onChange={(e) => setShift(e.target.value)}
-                >
-                  {SHIFTS.map((s) => (
-                    <option key={s} value={s}>
-                      {s}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
+        {/* Table */}
+        <div className="rounded-2xl bg-slate-900/90 border border-slate-800 p-4 shadow-sm shadow-slate-900/60">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-sm font-semibold text-slate-100">
+              Container List
+            </h2>
+            {loading && (
+              <div className="text-[11px] text-slate-400">Loading…</div>
+            )}
+          </div>
 
-            <div>
-              <label className="block text-xs text-slate-300 mb-1">
-                Work Order (optional)
-              </label>
-              <select
-                className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2 text-sm text-slate-50"
-                value={workOrderId}
-                onChange={(e) => setWorkOrderId(e.target.value)}
-              >
-                <option value="">Unassigned</option>
-                {workOrders.map((wo) => (
-                  <option key={wo.id} value={wo.id}>
-                    {wo.code} • {wo.building} • {wo.shift}
-                  </option>
-                ))}
-              </select>
-              <p className="text-[11px] text-slate-500 mt-1">
-                Tie this container to a specific work order (optional).
-              </p>
-            </div>
-
-            {/* Assign lumpers directly here */}
-            <div className="mt-3 border-t border-slate-800 pt-3 space-y-2">
-              <div className="flex items-center justify-between">
-                <div className="text-xs text-slate-300">
-                  Assign Lumpers (from Workforce)
-                </div>
-                <div className="text-[11px] text-slate-500">
-                  Total % must equal 100% if any workers are assigned.
-                </div>
-              </div>
-
-              <div className="space-y-2">
-                {createWorkers.map((row, idx) => (
-                  <div
-                    key={idx}
-                    className="bg-slate-900 border border-slate-800 rounded-lg p-2 space-y-1"
+          <div className="overflow-x-auto text-xs">
+            <table className="min-w-full border-collapse">
+              <thead>
+                <tr className="border-b border-slate-800 text-[11px] text-slate-400">
+                  <th className="text-left py-2 pr-3">Date</th>
+                  <th className="text-left py-2 pr-3">Building</th>
+                  <th className="text-left py-2 pr-3">Container #</th>
+                  <th className="text-right py-2 pr-3">Pieces</th>
+                  <th className="text-right py-2 pr-3">SKUs</th>
+                  <th className="text-right py-2 pr-3">Pay Total</th>
+                  <th className="text-left py-2 pr-3">Workers</th>
+                  <th className="text-right py-2 pl-3">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredContainers.length === 0 && !loading && (
+                  <tr>
+                    <td
+                      colSpan={8}
+                      className="py-3 text-center text-[11px] text-slate-500"
+                    >
+                      No containers found for this filter.
+                    </td>
+                  </tr>
+                )}
+                {filteredContainers.map((c) => (
+                  <tr
+                    key={c.id}
+                    className="border-b border-slate-800/60 hover:bg-slate-900/70"
                   >
-                    <div className="flex gap-2">
-                      <select
-                        className="flex-1 rounded bg-slate-950 border border-slate-700 px-2 py-1 text-[11px] text-slate-50"
-                        value={row.workerId}
-                        onChange={(e) =>
-                          updateCreateWorkerRow(
-                            idx,
-                            "workerId",
-                            e.target.value
-                          )
+                    <td className="py-2 pr-3 text-[11px] text-slate-400">
+                      {new Date(c.created_at).toLocaleString()}
+                    </td>
+                    <td className="py-2 pr-3 text-[11px] text-slate-200">
+                      {c.building}
+                    </td>
+                    <td className="py-2 pr-3 text-[11px] text-slate-200">
+                      {c.container_no}
+                    </td>
+                    <td className="py-2 pr-3 text-right text-[11px] text-slate-200">
+                      {c.pieces_total}
+                    </td>
+                    <td className="py-2 pr-3 text-right text-[11px] text-slate-200">
+                      {c.skus_total}
+                    </td>
+                    <td className="py-2 pr-3 text-right text-[11px] text-emerald-300">
+                      ${Number(c.pay_total).toFixed(2)}
+                    </td>
+                    <td className="py-2 pr-3 text-[11px] text-slate-300">
+                      {(c.workers || [])
+                        .filter((w) => w.name)
+                        .map(
+                          (w) =>
+                            `${w.name} (${w.percentContribution}% · $${w.payout.toFixed(
+                              2
+                            )})`
+                        )
+                        .join(", ") || "—"}
+                    </td>
+                    <td className="py-2 pl-3 text-right">
+                      <div className="inline-flex gap-2">
+                        <button
+                          className="px-3 py-1 rounded-lg bg-slate-800 text-[11px] text-slate-100 hover:bg-slate-700"
+                          onClick={() => openEditForm(c)}
+                        >
+                          Edit
+                        </button>
+                        <button
+                          className="px-3 py-1 rounded-lg bg-rose-700 text-[11px] text-white hover:bg-rose-600"
+                          onClick={() => handleDelete(c.id)}
+                          disabled={saving}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {/* Form modal */}
+        {showForm && (
+          <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+            <div className="w-full max-w-2xl rounded-2xl bg-slate-950 border border-slate-800 shadow-xl p-6 text-xs">
+              <div className="flex items-center justify-between mb-3">
+                <h2 className="text-sm font-semibold text-slate-100">
+                  {formState.id ? "Edit Container" : "New Container"}
+                </h2>
+                <button
+                  onClick={() => {
+                    setShowForm(false);
+                    resetForm();
+                  }}
+                  className="text-[11px] text-slate-400 hover:text-slate-200"
+                >
+                  ✕ Close
+                </button>
+              </div>
+
+              <form onSubmit={handleSubmit} className="space-y-4">
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                  <div>
+                    <label className="block text-[11px] text-slate-400 mb-1">
+                      Building
+                    </label>
+                    <select
+                      className="w-full rounded-lg bg-slate-950 border border-slate-700 px-2 py-1.5 text-[11px] text-slate-50"
+                      value={formState.building}
+                      onChange={(e) =>
+                        setFormState((prev) => ({
+                          ...prev,
+                          building: e.target.value,
+                        }))
+                      }
+                    >
+                      {BUILDINGS.map((b) => (
+                        <option key={b} value={b}>
+                          {b}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[11px] text-slate-400 mb-1">
+                      Container #
+                    </label>
+                    <input
+                      className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
+                      value={formState.containerNo}
+                      onChange={(e) =>
+                        setFormState((prev) => ({
+                          ...prev,
+                          containerNo: e.target.value,
+                        }))
+                      }
+                      placeholder="e.g., MSKU1234567"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] text-slate-400 mb-1">
+                      Pieces Total
+                    </label>
+                    <input
+                      type="number"
+                      className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
+                      value={formState.piecesTotal}
+                      onChange={(e) =>
+                        setFormState((prev) => ({
+                          ...prev,
+                          piecesTotal: Number(e.target.value) || 0,
+                        }))
+                      }
+                      min={0}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] text-slate-400 mb-1">
+                      SKU Count
+                    </label>
+                    <input
+                      type="number"
+                      className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
+                      value={formState.skusTotal}
+                      onChange={(e) =>
+                        setFormState((prev) => ({
+                          ...prev,
+                          skusTotal: Number(e.target.value) || 0,
+                        }))
+                      }
+                      min={0}
+                    />
+                  </div>
+                </div>
+
+                <div className="rounded-xl bg-slate-900 border border-slate-800 p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div className="text-[11px] text-slate-300 font-semibold">
+                      Worker Contributions
+                    </div>
+                    <div className="text-[11px] text-slate-400">
+                      Total %:{" "}
+                      <span
+                        className={
+                          isPercentValid ? "text-emerald-300" : "text-rose-300"
                         }
                       >
-                        <option value="">Select worker</option>
-                        {workforceOptions.map((w) => (
-                          <option key={w.id} value={w.id}>
-                            {w.name}
-                            {w.role ? ` • ${w.role}` : ""}
-                            {w.building ? ` • ${w.building}` : ""}
-                          </option>
-                        ))}
-                      </select>
+                        {percentSum}%
+                      </span>{" "}
+                      · Container Pay:{" "}
+                      <span className="text-emerald-300">
+                        ${payForForm.toFixed(2)}
+                      </span>
                     </div>
-                    <div className="flex gap-2">
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-4 gap-2 text-[11px] text-slate-400 font-semibold mb-1">
+                    <div>Name</div>
+                    <div>Minutes Worked</div>
+                    <div>% Contribution</div>
+                    <div>Payout</div>
+                  </div>
+                  {(formState.workers || []).map((w, idx) => (
+                    <div
+                      key={idx}
+                      className="grid grid-cols-1 md:grid-cols-4 gap-2 items-center"
+                    >
                       <input
-                        className="flex-1 rounded bg-slate-950 border border-slate-700 px-2 py-1 text-[11px] text-slate-50"
-                        placeholder="Minutes worked"
-                        value={row.minutesWorked}
+                        className="rounded-lg bg-slate-950 border border-slate-700 px-2 py-1 text-[11px] text-slate-50"
+                        value={w.name}
                         onChange={(e) =>
-                          updateCreateWorkerRow(
-                            idx,
-                            "minutesWorked",
-                            e.target.value
-                          )
+                          handleWorkerChange(idx, "name", e.target.value)
                         }
+                        placeholder={`Worker ${idx + 1}`}
                       />
                       <input
-                        className="w-28 rounded bg-slate-950 border border-slate-700 px-2 py-1 text-[11px] text-slate-50"
-                        placeholder="% contribution"
-                        value={row.percentContribution}
+                        type="number"
+                        className="rounded-lg bg-slate-950 border border-slate-700 px-2 py-1 text-[11px] text-slate-50"
+                        value={w.minutesWorked}
                         onChange={(e) =>
-                          updateCreateWorkerRow(
+                          handleWorkerChange(idx, "minutesWorked", e.target.value)
+                        }
+                        min={0}
+                      />
+                      <input
+                        type="number"
+                        className="rounded-lg bg-slate-950 border border-slate-700 px-2 py-1 text-[11px] text-slate-50"
+                        value={w.percentContribution}
+                        onChange={(e) =>
+                          handleWorkerChange(
                             idx,
                             "percentContribution",
                             e.target.value
                           )
                         }
+                        min={0}
+                        max={100}
                       />
+                      <div className="text-[11px] text-emerald-300">
+                        $
+                        {workersWithPayout[idx]
+                          ? workersWithPayout[idx].payout.toFixed(2)
+                          : "0.00"}
+                      </div>
                     </div>
+                  ))}
+                  <p className="text-[10px] text-slate-500 mt-1">
+                    You can assign up to four workers. If you use contributions,
+                    the percentages must sum to exactly 100% before you can
+                    save.
+                  </p>
+                </div>
+
+                {error && (
+                  <div className="rounded-lg border border-rose-700 bg-rose-950/40 px-3 py-2 text-[11px] text-rose-100">
+                    {error}
                   </div>
-                ))}
-              </div>
-            </div>
+                )}
 
-            <button
-              type="submit"
-              className="mt-2 rounded-lg bg-sky-600 hover:bg-sky-500 text-sm font-medium text-white px-4 py-2"
-            >
-              Save Container
-            </button>
-          </form>
-        </div>
-
-        {/* Containers list + lumpers editing (still workforce-based) */}
-        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 lg:col-span-2 space-y-4">
-          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
-            <h2 className="text-sm font-semibold text-slate-100">
-              Containers & Lumpers
-            </h2>
-            <div className="flex flex-wrap gap-2 text-xs">
-              <select
-                className="rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-slate-50"
-                value={filterBuilding}
-                onChange={(e) => setFilterBuilding(e.target.value)}
-              >
-                <option value="ALL">All Buildings</option>
-                {BUILDINGS.map((b) => (
-                  <option key={b} value={b}>
-                    {b}
-                  </option>
-                ))}
-              </select>
-
-              <select
-                className="rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-slate-50"
-                value={filterWorkOrder}
-                onChange={(e) => setFilterWorkOrder(e.target.value)}
-              >
-                <option value="ALL">All Work Orders</option>
-                <option value="NONE">Unassigned</option>
-                {workOrders.map((wo) => (
-                  <option key={wo.id} value={wo.id}>
-                    {wo.code} • {wo.building} • {wo.shift}
-                  </option>
-                ))}
-              </select>
+                <div className="flex items-center justify-between mt-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowForm(false);
+                      resetForm();
+                    }}
+                    className="rounded-lg border border-slate-700 px-3 py-1.5 text-[11px] text-slate-200 hover:bg-slate-800"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={saving || (!isPercentValid && percentSum !== 0)}
+                    className="rounded-lg bg-sky-600 hover:bg-sky-500 disabled:opacity-60 text-[11px] font-medium text-white px-4 py-2"
+                  >
+                    {saving
+                      ? "Saving…"
+                      : formState.id
+                      ? "Save Changes"
+                      : "Create Container"}
+                  </button>
+                </div>
+              </form>
             </div>
           </div>
-
-          {infoError && (
-            <div className="text-[11px] text-red-300 bg-red-950/40 border border-red-800 rounded px-3 py-2 mb-2">
-              {infoError}
-            </div>
-          )}
-          {workerError && !error && (
-            <div className="text-[11px] text-red-300 bg-red-950/40 border border-red-800 rounded px-3 py-2 mb-2">
-              {workerError}
-            </div>
-          )}
-
-          {filteredContainers.length === 0 ? (
-            <p className="text-sm text-slate-500">
-              No containers match the current filters.
-            </p>
-          ) : (
-            <div className="space-y-2 text-xs max-h-[520px] overflow-auto pr-1">
-              {filteredContainers.map((c) => {
-                const totalPercent = computeDisplayPercentForContainer(c);
-                const payTotal = calculateContainerPay(c.piecesTotal);
-                const isEditingLumpers = editingContainerId === c.id;
-                const isEditingInfo = editingInfoId === c.id;
-
-                return (
-                  <div
-                    key={c.id}
-                    className="border border-slate-800 rounded-xl bg-slate-950 p-3 space-y-2"
-                  >
-                    {/* Header row */}
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="space-y-1">
-                        <div className="text-slate-100 text-sm font-semibold">
-                          {c.containerNo}
-                        </div>
-                        <div className="text-slate-400">
-                          {c.piecesTotal} pieces · {c.skusTotal} SKUs
-                        </div>
-                        <div className="text-[11px] text-slate-500">
-                          {c.building} • {c.shift} Shift •{" "}
-                          {c.createdAt.slice(0, 10)}
-                        </div>
-                      </div>
-                      <div className="text-right text-[11px] space-y-1">
-                        <div className="text-slate-400">
-                          Work Order:
-                          <br />
-                          <span className="text-sky-300">
-                            {workOrderLabel(c.workOrderId)}
-                          </span>
-                        </div>
-                        <div className="text-slate-400">
-                          Container Pay:
-                          <br />
-                          <span className="text-emerald-300">
-                            ${payTotal.toFixed(2)}
-                          </span>
-                        </div>
-                        <div className="flex gap-1 justify-end mt-1">
-                          <button
-                            type="button"
-                            onClick={() =>
-                              isEditingInfo
-                                ? setEditingInfoId(null)
-                                : startEditContainerInfo(c)
-                            }
-                            className="text-[11px] px-2 py-0.5 rounded-full border border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800"
-                          >
-                            {isEditingInfo ? "Cancel Edit" : "Edit Info"}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleDeleteContainer(c.id)}
-                            className="text-[11px] px-2 py-0.5 rounded-full border border-red-700 bg-red-950 text-red-200 hover:bg-red-900"
-                          >
-                            Delete
-                          </button>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            isEditingLumpers
-                              ? setEditingContainerId(null)
-                              : startEditingContainer(c)
-                          }
-                          className="mt-1 text-[11px] px-2 py-0.5 rounded-full border border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800"
-                        >
-                          {isEditingLumpers
-                            ? "Hide Lumpers"
-                            : "View / Edit Lumpers"}
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* Edit container info section */}
-                    {isEditingInfo && (
-                      <div className="pt-3 border-t border-slate-800 space-y-2">
-                        <div className="text-[11px] text-slate-300 mb-1">
-                          Edit Container Info
-                        </div>
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-[11px]">
-                          <div>
-                            <label className="block text-[11px] text-slate-400 mb-1">
-                              Container Number
-                            </label>
-                            <input
-                              className="w-full rounded bg-slate-950 border border-slate-700 px-2 py-1 text-[11px] text-slate-50"
-                              value={editInfo.containerNo}
-                              onChange={(e) =>
-                                setEditInfo((prev) => ({
-                                  ...prev,
-                                  containerNo: e.target.value,
-                                }))
-                              }
-                            />
-                          </div>
-                          <div>
-                            <label className="block text-[11px] text-slate-400 mb-1">
-                              Pieces Total
-                            </label>
-                            <input
-                              type="number"
-                              min={1}
-                              className="w-full rounded bg-slate-950 border border-slate-700 px-2 py-1 text-[11px] text-slate-50"
-                              value={editInfo.piecesTotal}
-                              onChange={(e) =>
-                                setEditInfo((prev) => ({
-                                  ...prev,
-                                  piecesTotal: e.target.value,
-                                }))
-                              }
-                            />
-                          </div>
-                          <div>
-                            <label className="block text-[11px] text-slate-400 mb-1">
-                              SKUs Total
-                            </label>
-                            <input
-                              type="number"
-                              min={1}
-                              className="w-full rounded bg-slate-950 border border-slate-700 px-2 py-1 text-[11px] text-slate-50"
-                              value={editInfo.skusTotal}
-                              onChange={(e) =>
-                                setEditInfo((prev) => ({
-                                  ...prev,
-                                  skusTotal: e.target.value,
-                                }))
-                              }
-                            />
-                          </div>
-                          <div>
-                            <label className="block text-[11px] text-slate-400 mb-1">
-                              Building
-                            </label>
-                            <select
-                              className="w-full rounded bg-slate-950 border border-slate-700 px-2 py-1 text-[11px] text-slate-50"
-                              value={editInfo.building}
-                              onChange={(e) =>
-                                setEditInfo((prev) => ({
-                                  ...prev,
-                                  building: e.target.value,
-                                }))
-                              }
-                            >
-                              {BUILDINGS.map((b) => (
-                                <option key={b} value={b}>
-                                  {b}
-                                </option>
-                              ))}
-                            </select>
-                          </div>
-                          <div>
-                            <label className="block text-[11px] text-slate-400 mb-1">
-                              Shift
-                            </label>
-                            <select
-                              className="w-full rounded bg-slate-950 border border-slate-700 px-2 py-1 text-[11px] text-slate-50"
-                              value={editInfo.shift}
-                              onChange={(e) =>
-                                setEditInfo((prev) => ({
-                                  ...prev,
-                                  shift: e.target.value,
-                                }))
-                              }
-                            >
-                              {SHIFTS.map((s) => (
-                                <option key={s} value={s}>
-                                  {s}
-                                </option>
-                              ))}
-                            </select>
-                          </div>
-                          <div>
-                            <label className="block text-[11px] text-slate-400 mb-1">
-                              Work Order
-                            </label>
-                            <select
-                              className="w-full rounded bg-slate-950 border border-slate-700 px-2 py-1 text-[11px] text-slate-50"
-                              value={editInfo.workOrderId}
-                              onChange={(e) =>
-                                setEditInfo((prev) => ({
-                                  ...prev,
-                                  workOrderId: e.target.value,
-                                }))
-                              }
-                            >
-                              <option value="">Unassigned</option>
-                              {workOrders.map((wo) => (
-                                <option key={wo.id} value={wo.id}>
-                                  {wo.code} • {wo.building} • {wo.shift}
-                                </option>
-                              ))}
-                            </select>
-                          </div>
-                        </div>
-                        <div className="flex justify-end gap-2 mt-2">
-                          <button
-                            type="button"
-                            onClick={() => setEditingInfoId(null)}
-                            className="rounded-lg border border-slate-700 bg-slate-900 text-[11px] text-slate-200 px-3 py-1 hover:bg-slate-800"
-                          >
-                            Cancel
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleSaveContainerInfo(c)}
-                            className="rounded-lg bg-sky-600 hover:bg-sky-500 text-[11px] font-medium text-white px-3 py-1"
-                          >
-                            Save Info
-                          </button>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Lumper editor (uses Workforce) */}
-                    {isEditingLumpers && (
-                      <div className="pt-3 border-t border-slate-800 space-y-2">
-                        <div className="flex items-center justify-between">
-                          <div className="text-[11px] text-slate-300">
-                            Lumpers / Worker Contributions (from Workforce)
-                          </div>
-                          <div className="text-[11px] text-slate-400">
-                            Total %:{" "}
-                            <span
-                              className={
-                                totalPercent === 100
-                                  ? "text-emerald-300"
-                                  : "text-amber-300"
-                              }
-                            >
-                              {totalPercent}%
-                            </span>
-                          </div>
-                        </div>
-
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                          {editWorkers.map((row, idx) => (
-                            <div
-                              key={idx}
-                              className="bg-slate-900 border border-slate-800 rounded-lg p-2 space-y-1"
-                            >
-                              <div className="flex gap-2">
-                                <select
-                                  className="flex-1 rounded bg-slate-950 border border-slate-700 px-2 py-1 text-[11px] text-slate-50"
-                                  value={row.workerId}
-                                  onChange={(e) =>
-                                    updateEditWorkerRow(
-                                      idx,
-                                      "workerId",
-                                      e.target.value
-                                    )
-                                  }
-                                >
-                                  <option value="">Select worker</option>
-                                  {workforceOptions.map((w) => (
-                                    <option key={w.id} value={w.id}>
-                                      {w.name}
-                                      {w.role ? ` • ${w.role}` : ""}
-                                      {w.building
-                                        ? ` • ${w.building}`
-                                        : ""}
-                                    </option>
-                                  ))}
-                                </select>
-                              </div>
-                              <div className="flex gap-2">
-                                <input
-                                  className="flex-1 rounded bg-slate-950 border border-slate-700 px-2 py-1 text-[11px] text-slate-50"
-                                  placeholder="Minutes worked"
-                                  value={row.minutesWorked}
-                                  onChange={(e) =>
-                                    updateEditWorkerRow(
-                                      idx,
-                                      "minutesWorked",
-                                      e.target.value
-                                    )
-                                  }
-                                />
-                                <input
-                                  className="w-28 rounded bg-slate-950 border border-slate-700 px-2 py-1 text-[11px] text-slate-50"
-                                  placeholder="% contribution"
-                                  value={row.percentContribution}
-                                  onChange={(e) =>
-                                    updateEditWorkerRow(
-                                      idx,
-                                      "percentContribution",
-                                      e.target.value
-                                    )
-                                  }
-                                />
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-
-                        <div className="flex items-center justify-between mt-2">
-                          <div className="text-[11px] text-slate-500">
-                            Payouts will be calculated from container pay
-                            and each worker&apos;s % contribution. Workers
-                            must exist in Workforce.
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => handleSaveWorkers(c)}
-                            className="rounded-lg bg-sky-600 hover:bg-sky-500 text-[11px] font-medium text-white px-3 py-1"
-                          >
-                            Save Lumpers & Payouts
-                          </button>
-                        </div>
-
-                        {/* Saved workers summary */}
-                        {c.workers && c.workers.length > 0 && (
-                          <div className="mt-2 border-t border-slate-800 pt-2">
-                            <div className="text-[11px] text-slate-300 mb-1">
-                              Saved Payouts
-                            </div>
-                            <div className="space-y-1">
-                              {c.workers.map((w) => (
-                                <div
-                                  key={w.id}
-                                  className="flex items-center justify-between text-[11px] bg-slate-900 border border-slate-800 rounded-lg px-2 py-1"
-                                >
-                                  <div>
-                                    <span className="text-slate-100">
-                                      {w.workerName}
-                                    </span>
-                                    {w.role && (
-                                      <span className="text-slate-400">
-                                        {" "}
-                                        • {w.role}
-                                      </span>
-                                    )}
-                                    <div className="text-slate-400">
-                                      {w.minutesWorked} min ·{" "}
-                                      {w.percentContribution}% share
-                                    </div>
-                                  </div>
-                                  <div className="text-emerald-300">
-                                    ${w.payout.toFixed(2)}
-                                  </div>
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
+        )}
       </div>
     </div>
   );

@@ -1,7 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, FormEvent } from "react";
+import { supabase } from "@/lib/supabaseClient";
+import { useCurrentUser } from "@/lib/useCurrentUser";
 
 const WORK_ORDERS_KEY = "precisionpulse_work_orders";
 const CONTAINERS_KEY = "precisionpulse_containers";
@@ -26,29 +28,38 @@ type ContainerRecord = {
   [key: string]: any; // keep any extra fields intact
 };
 
-function normalizeWorkOrder(raw: any): WorkOrderRecord {
-  const id = String(raw?.id ?? Date.now());
-  const createdAt =
-    raw?.createdAt ??
-    raw?.date ??
-    new Date().toISOString();
+// Shape as stored in Supabase
+type WorkOrderRow = {
+  id: string;
+  created_at: string;
+  building: string;
+  shift_name: string | null;
+  work_order_code: string | null;
+  status: string;
+  notes: string | null;
+};
+
+function mapRowToRecord(row: WorkOrderRow): WorkOrderRecord {
+  const id = String(row.id);
+  const createdAt = row.created_at ?? new Date().toISOString();
   const name =
-    raw?.name ??
-    raw?.title ??
-    `Work Order ${id.slice(-4)}`;
+    row.work_order_code ??
+    row.status + " Work Order " + id.slice(-4);
 
   return {
     id,
     name,
-    building: raw?.building ?? "DC1",
-    shift: raw?.shift ?? "1st",
-    status: raw?.status ?? "Pending",
+    building: row.building ?? "DC1",
+    shift: row.shift_name ?? "1st",
+    status: row.status ?? "Pending",
     createdAt,
-    notes: raw?.notes ?? raw?.description ?? "",
+    notes: row.notes ?? "",
   };
 }
 
 export default function WorkOrdersPage() {
+  const currentUser = useCurrentUser();
+
   const [workOrders, setWorkOrders] = useState<WorkOrderRecord[]>([]);
   const [containers, setContainers] = useState<ContainerRecord[]>([]);
 
@@ -63,33 +74,9 @@ export default function WorkOrdersPage() {
   const [filterBuilding, setFilterBuilding] = useState<string>("ALL");
   const [filterStatus, setFilterStatus] = useState<string>("ALL");
 
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-
-    try {
-      const raw = window.localStorage.getItem(WORK_ORDERS_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        const normalized: WorkOrderRecord[] = Array.isArray(parsed)
-          ? parsed.map(normalizeWorkOrder)
-          : [];
-        setWorkOrders(normalized);
-      }
-    } catch (e) {
-      console.error("Failed to load work orders", e);
-    }
-
-    try {
-      const raw = window.localStorage.getItem(CONTAINERS_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        const arr: ContainerRecord[] = Array.isArray(parsed) ? parsed : [];
-        setContainers(arr);
-      }
-    } catch (e) {
-      console.error("Failed to load containers for work order linking", e);
-    }
-  }, []);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   function persistWorkOrders(next: WorkOrderRecord[]) {
     setWorkOrders(next);
@@ -105,10 +92,59 @@ export default function WorkOrdersPage() {
     }
   }
 
+  async function refreshWorkOrders() {
+    if (!currentUser) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const { data, error } = await supabase
+        .from("work_orders")
+        .select("*")
+        .order("created_at", { ascending: false });
+
+      if (error) {
+        console.error("Error loading work orders", error);
+        setError("Failed to load work orders from server.");
+        return;
+      }
+
+      const rows = (data || []) as WorkOrderRow[];
+      const mapped = rows.map(mapRowToRecord);
+      persistWorkOrders(mapped);
+    } catch (e) {
+      console.error("Unexpected error loading work orders", e);
+      setError("Unexpected error loading work orders.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // Load work orders from Supabase when we know who is logged in
+  useEffect(() => {
+    if (!currentUser) return;
+    refreshWorkOrders();
+  }, [currentUser]);
+
+  // Load containers from localStorage for "containers per work order" counts
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    try {
+      const raw = window.localStorage.getItem(CONTAINERS_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        const arr: ContainerRecord[] = Array.isArray(parsed) ? parsed : [];
+        setContainers(arr);
+      }
+    } catch (e) {
+      console.error("Failed to load containers for work order linking", e);
+    }
+  }, []);
+
   function resetForm() {
     setEditingId(null);
     setName("");
-    setBuilding("DC1");
+    setBuilding(currentUser?.building || "DC18");
     setShift("1st");
     setStatus("Pending");
     setNotes("");
@@ -123,36 +159,57 @@ export default function WorkOrdersPage() {
     setNotes(order.notes ?? "");
   }
 
-  function handleDelete(order: WorkOrderRecord) {
+  async function handleDelete(order: WorkOrderRecord) {
     if (typeof window !== "undefined") {
-      const confirm = window.confirm(
+      const confirmDelete = window.confirm(
         "Delete this work order? Any containers linked to it will stay, but the link to this work order will be removed."
       );
-      if (!confirm) return;
+      if (!confirmDelete) return;
     }
 
-    // Remove work order
-    const nextOrders = workOrders.filter((w) => w.id !== order.id);
-    persistWorkOrders(nextOrders);
+    setSaving(true);
+    setError(null);
 
-    // Detach containers that were linked to this work order
-    const updatedContainers = containers.map((c) => {
-      if (c.workOrderId === order.id) {
-        const copy = { ...c };
-        delete copy.workOrderId;
-        return copy;
+    try {
+      const { error } = await supabase
+        .from("work_orders")
+        .delete()
+        .eq("id", order.id);
+
+      if (error) {
+        console.error("Error deleting work order", error);
+        setError("Failed to delete work order.");
+        return;
       }
-      return c;
-    });
-    persistContainers(updatedContainers);
 
-    if (editingId === order.id) {
-      resetForm();
+      // Detach containers that were linked to this work order (local only for now)
+      const updatedContainers = containers.map((c) => {
+        if (c.workOrderId === order.id) {
+          const copy = { ...c };
+          delete copy.workOrderId;
+          return copy;
+        }
+        return c;
+      });
+      persistContainers(updatedContainers);
+
+      // Reload from Supabase to keep in sync
+      await refreshWorkOrders();
+
+      if (editingId === order.id) {
+        resetForm();
+      }
+    } catch (e) {
+      console.error("Unexpected error deleting work order", e);
+      setError("Unexpected error deleting work order.");
+    } finally {
+      setSaving(false);
     }
   }
 
-  function handleSubmit(e: React.FormEvent) {
+  async function handleSubmit(e: FormEvent) {
     e.preventDefault();
+    if (saving) return;
 
     if (!name.trim()) {
       if (typeof window !== "undefined") {
@@ -161,36 +218,46 @@ export default function WorkOrdersPage() {
       return;
     }
 
-    const nowIso = new Date().toISOString();
+    setSaving(true);
+    setError(null);
 
-    if (editingId) {
-      const next = workOrders.map((wo) =>
-        wo.id === editingId
-          ? {
-              ...wo,
-              name: name.trim(),
-              building,
-              shift,
-              status,
-              notes: notes.trim(),
-            }
-          : wo
-      );
-      persistWorkOrders(next);
-    } else {
-      const newOrder: WorkOrderRecord = {
-        id: String(Date.now()),
-        name: name.trim(),
+    try {
+      const payload = {
         building,
-        shift,
+        shift_name: shift,
+        work_order_code: name.trim(),
         status,
-        notes: notes.trim(),
-        createdAt: nowIso,
+        notes: notes.trim() || null,
       };
-      persistWorkOrders([newOrder, ...workOrders]);
-    }
 
-    resetForm();
+      if (editingId) {
+        const { error } = await supabase
+          .from("work_orders")
+          .update(payload)
+          .eq("id", editingId);
+
+        if (error) {
+          console.error("Error updating work order", error);
+          setError("Failed to update work order.");
+          return;
+        }
+      } else {
+        const { error } = await supabase.from("work_orders").insert(payload);
+        if (error) {
+          console.error("Error creating work order", error);
+          setError("Failed to create work order.");
+          return;
+        }
+      }
+
+      await refreshWorkOrders();
+      resetForm();
+    } catch (e) {
+      console.error("Unexpected error saving work order", e);
+      setError("Unexpected error saving work order.");
+    } finally {
+      setSaving(false);
+    }
   }
 
   const displayedOrders = useMemo(() => {
@@ -209,6 +276,21 @@ export default function WorkOrdersPage() {
 
   function containersForOrder(orderId: string): ContainerRecord[] {
     return containers.filter((c) => c.workOrderId === orderId);
+  }
+
+  // Protect route after all hooks are declared
+  if (!currentUser) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-400 flex flex-col items-center justify-center text-sm gap-2">
+        <div>Redirecting to login…</div>
+        <a
+          href="/auth"
+          className="text-sky-400 text-xs underline hover:text-sky-300"
+        >
+          Click here if you are not redirected.
+        </a>
+      </div>
+    );
   }
 
   return (
@@ -251,6 +333,11 @@ export default function WorkOrdersPage() {
                 </button>
               )}
             </div>
+            {error && (
+              <div className="mb-2 rounded-lg border border-rose-700 bg-rose-950/40 px-3 py-2 text-[11px] text-rose-100">
+                {error}
+              </div>
+            )}
             <form onSubmit={handleSubmit} className="space-y-3">
               <div>
                 <label className="block text-[11px] text-slate-400 mb-1">
@@ -331,9 +418,14 @@ export default function WorkOrdersPage() {
 
               <button
                 type="submit"
-                className="mt-1 w-full rounded-lg bg-sky-600 hover:bg-sky-500 text-[11px] font-medium text-white px-4 py-2"
+                disabled={saving}
+                className="mt-1 w-full rounded-lg bg-sky-600 hover:bg-sky-500 disabled:opacity-60 text-[11px] font-medium text-white px-4 py-2"
               >
-                {editingId ? "Save Changes" : "Create Work Order"}
+                {saving
+                  ? "Saving…"
+                  : editingId
+                  ? "Save Changes"
+                  : "Create Work Order"}
               </button>
             </form>
           </div>
@@ -413,6 +505,11 @@ export default function WorkOrdersPage() {
                   </div>
                 </div>
               </div>
+              {loading && (
+                <div className="mt-2 text-[11px] text-slate-500">
+                  Loading work orders…
+                </div>
+              )}
             </div>
 
             {/* Table */}
@@ -520,6 +617,7 @@ export default function WorkOrdersPage() {
                                   type="button"
                                   onClick={() => handleDelete(wo)}
                                   className="text-[11px] text-rose-300 hover:underline"
+                                  disabled={saving}
                                 >
                                   Delete
                                 </button>
