@@ -1,312 +1,189 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
-import Link from "next/link";
-
-const USERS_KEY = "precisionpulse_users";
-const CURRENT_USER_KEY = "precisionpulse_currentUser";
-
-type AppUser = {
-  id: string;
-  email: string;
-  name: string;
-  password: string;
-  accessRole: string;
-  building: string;
-  createdAt: string;
-};
+import { supabase } from "@/lib/supabaseClient";
 
 export default function AuthPage() {
   const router = useRouter();
 
-  const [usersExist, setUsersExist] = useState<boolean | null>(null);
-  const [knownEmails, setKnownEmails] = useState<string[]>([]);
+  const [mode, setMode] = useState<"login" | "signup">("login");
+  const [fullName, setFullName] = useState("");
+  const [email, setEmail] = useState("");
+  const [building, setBuilding] = useState("DC18");
+  const [password, setPassword] = useState("");
+  const [password2, setPassword2] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
 
-  // login form
-  const [loginEmail, setLoginEmail] = useState("");
-  const [loginPassword, setLoginPassword] = useState("");
-  const [loginError, setLoginError] = useState<string | null>(null);
+  async function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    setError(null);
+    setLoading(true);
 
-  // first-time setup
-  const [setupName, setSetupName] = useState("Ryan Blankenship");
-  const [setupEmail, setSetupEmail] = useState("ryan@precisionlumping.com");
-  const [setupPassword, setSetupPassword] = useState("");
-  const [setupPassword2, setSetupPassword2] = useState("");
-  const [setupBuilding, setSetupBuilding] = useState("DC18");
-  const [setupError, setSetupError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-
-    // If logged in, redirect
     try {
-      const rawCurrent = window.localStorage.getItem(CURRENT_USER_KEY);
-      if (rawCurrent) {
-        router.replace("/");
+      if (!email.trim()) {
+        setError("Please enter an email address.");
         return;
       }
-    } catch {}
-
-    // Check for users
-    try {
-      const raw = window.localStorage.getItem(USERS_KEY);
-      if (!raw) {
-        setUsersExist(false);
+      if (!password) {
+        setError("Please enter a password.");
         return;
       }
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        setUsersExist(true);
-        setKnownEmails(parsed.map((u: any) => u.email));
+
+      const emailLower = email.trim().toLowerCase();
+
+      if (mode === "signup") {
+        if (!fullName.trim()) {
+          setError("Please enter your full name.");
+          return;
+        }
+        if (!password2) {
+          setError("Please confirm your password.");
+          return;
+        }
+        if (password !== password2) {
+          setError("Passwords do not match.");
+          return;
+        }
+
+        // 1) Sign up with Supabase Auth
+        const { data, error: signupError } = await supabase.auth.signUp({
+          email: emailLower,
+          password,
+        });
+
+        if (signupError) {
+          console.error("Sign up error:", signupError);
+          setError(signupError.message);
+          return;
+        }
+
+        const authUser = data.user;
+        if (!authUser) {
+          setError(
+            "Sign up successful, but no user returned. Check your email if confirmations are required."
+          );
+          return;
+        }
+
+        // 2) Try to insert a profile row (not fatal if it fails)
+        const { error: profileError } = await supabase.from("profiles").insert({
+          id: authUser.id,
+          email: emailLower,
+          full_name: fullName.trim(),
+          access_role: "Building Manager", // default; you'll promote yourself in Supabase
+          building: building,
+        });
+
+        if (profileError) {
+          console.error("Profile insert error", profileError);
+          // we show a gentle message but don't block login
+          // setError("Account created, but there was a problem saving your profile.");
+          // (we won't block flow here)
+        }
+
+        // 3) Ensure we actually have a session by logging in
+        const { error: loginAfterSignupError } =
+          await supabase.auth.signInWithPassword({
+            email: emailLower,
+            password,
+          });
+
+        if (loginAfterSignupError) {
+          console.error("Login after signup error:", loginAfterSignupError);
+          setError(
+            "Account created, but login failed. Try logging in with your email and password."
+          );
+          return;
+        }
+
+        // 4) Go to dashboard
+        router.push("/");
+        return;
       } else {
-        setUsersExist(false);
+        // LOGIN mode
+        const { error: loginError } =
+          await supabase.auth.signInWithPassword({
+            email: emailLower,
+            password,
+          });
+
+        if (loginError) {
+          console.error("Login error:", loginError);
+          setError(loginError.message);
+          return;
+        }
+
+        // Logged in → go to dashboard
+        router.push("/");
+        return;
       }
-    } catch {
-      setUsersExist(false);
+    } finally {
+      setLoading(false);
     }
-  }, [router]);
-
-  function loadUsers(): AppUser[] {
-    try {
-      const raw = window.localStorage.getItem(USERS_KEY);
-      if (!raw) return [];
-      return JSON.parse(raw);
-    } catch {
-      return [];
-    }
-  }
-
-  function saveUsers(users: AppUser[]) {
-    window.localStorage.setItem(USERS_KEY, JSON.stringify(users));
-  }
-
-  function saveCurrentUser(user: AppUser) {
-    window.localStorage.setItem(
-      CURRENT_USER_KEY,
-      JSON.stringify({
-        id: user.id,
-        email: user.email,
-        name: user.name,
-        accessRole: user.accessRole,
-        building: user.building,
-        createdAt: user.createdAt,
-      })
-    );
-  }
-
-  function handleLogin(e: React.FormEvent) {
-    e.preventDefault();
-    setLoginError(null);
-
-    const users = loadUsers();
-    const user = users.find(
-      (u) => u.email.toLowerCase() === loginEmail.trim().toLowerCase()
-    );
-
-    if (!user) {
-      setLoginError("User not found.");
-      return;
-    }
-    if (user.password !== loginPassword) {
-      setLoginError("Incorrect password.");
-      return;
-    }
-
-    saveCurrentUser(user);
-    router.replace("/");
-  }
-
-  function handleFirstSetup(e: React.FormEvent) {
-    e.preventDefault();
-    setSetupError(null);
-
-    if (!setupName.trim()) return setSetupError("Enter your name.");
-    if (!setupEmail.trim()) return setSetupError("Enter your email.");
-    if (setupPassword !== setupPassword2)
-      return setSetupError("Passwords do not match.");
-
-    const users = loadUsers();
-
-    if (users.length > 0) {
-      setSetupError("Users already exist. Use login instead.");
-      setUsersExist(true);
-      return;
-    }
-
-    const now = new Date().toISOString();
-
-    const user: AppUser = {
-      id: String(Date.now()),
-      email: setupEmail.trim(),
-      name: setupName.trim(),
-      password: setupPassword,
-      accessRole: "Super Admin",
-      building: setupBuilding,
-      createdAt: now,
-    };
-
-    saveUsers([user]);
-    saveCurrentUser(user);
-    router.replace("/");
-  }
-
-  function handleResetAccounts() {
-    const ok = window.confirm(
-      "This will delete ALL login accounts in THIS browser only. It will NOT delete containers, work orders, workforce, or any other operations data. Continue?"
-    );
-    if (!ok) return;
-
-    window.localStorage.removeItem(USERS_KEY);
-    window.localStorage.removeItem(CURRENT_USER_KEY);
-
-    setUsersExist(false);
-    setKnownEmails([]);
-    router.replace("/auth");
-  }
-
-  if (usersExist === null) {
-    return (
-      <div className="min-h-screen bg-slate-950 text-slate-400 flex justify-center items-center">
-        Loading…
-      </div>
-    );
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-950 to-slate-900 text-slate-50">
-      <div className="max-w-md mx-auto p-6 space-y-6">
-        <div className="text-center">
-          <div className="text-xs text-sky-300 font-semibold">
-            Precision Pulse
-          </div>
-          <h1 className="text-xl font-semibold">
-            {usersExist ? "Sign In" : "Create Super Admin"}
+    <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-950 to-slate-900 flex items-center justify-center px-4">
+      <div className="w-full max-w-md rounded-2xl border border-slate-800 bg-slate-950/90 p-6 shadow-xl">
+        <div className="mb-4 text-center">
+          <h1 className="text-xl font-semibold text-slate-50">
+            Precision Pulse Login
           </h1>
-          <p className="text-[11px] text-slate-500">
-            {usersExist
-              ? "Log in to access the system."
-              : "First-time setup — this will create your main admin account."}
+          <p className="text-xs text-slate-400 mt-1">
+            Sign in to your Precision Pulse account, or create one if this is
+            your first time.
           </p>
         </div>
 
-        {/* LOGIN FORM */}
-        {usersExist ? (
-          <>
-            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 text-xs space-y-3">
-              {knownEmails.length > 0 && (
-                <div className="text-[11px] text-slate-400">
-                  Known accounts:{" "}
-                  <span className="text-slate-200">{knownEmails.join(", ")}</span>
-                </div>
-              )}
+        <div className="flex mb-4 text-xs rounded-full bg-slate-900 border border-slate-800 p-1">
+          <button
+            type="button"
+            onClick={() => setMode("login")}
+            className={`flex-1 py-1.5 rounded-full ${
+              mode === "login"
+                ? "bg-sky-600 text-white"
+                : "text-slate-300 hover:bg-slate-800"
+            }`}
+          >
+            Log In
+          </button>
+          <button
+            type="button"
+            onClick={() => setMode("signup")}
+            className={`flex-1 py-1.5 rounded-full ${
+              mode === "signup"
+                ? "bg-sky-600 text-white"
+                : "text-slate-300 hover:bg-slate-800"
+            }`}
+          >
+            Create Account
+          </button>
+        </div>
 
-              <form onSubmit={handleLogin} className="space-y-3">
-                <div>
-                  <label className="block text-[11px] mb-1">Email</label>
-                  <input
-                    type="email"
-                    className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-[11px]"
-                    value={loginEmail}
-                    onChange={(e) => setLoginEmail(e.target.value)}
-                    placeholder="you@precisionlumping.com"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[11px] mb-1">Password</label>
-                  <input
-                    type="password"
-                    className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-[11px]"
-                    value={loginPassword}
-                    onChange={(e) => setLoginPassword(e.target.value)}
-                    placeholder="••••••••"
-                  />
-                </div>
-
-                {loginError && (
-                  <div className="text-[11px] text-rose-300 bg-rose-900/40 border border-rose-700/70 rounded-lg px-3 py-2">
-                    {loginError}
-                  </div>
-                )}
-
-                <button
-                  type="submit"
-                  className="w-full bg-sky-600 hover:bg-sky-500 rounded-lg py-2 text-[11px] font-semibold"
-                >
-                  Log In
-                </button>
-              </form>
-            </div>
-
-            {/* RESET BOX */}
-            <div className="bg-slate-950 border border-red-800/70 rounded-2xl p-4 text-xs">
-              <div className="text-red-300 font-semibold text-[11px] mb-1">
-                Reset Login Accounts
-              </div>
-              <p className="text-[11px] text-slate-300 mb-2">
-                This ONLY resets login accounts in this browser. It does NOT
-                delete containers, work orders, or workforce data.
-              </p>
-              <button
-                onClick={handleResetAccounts}
-                className="bg-red-700 hover:bg-red-600 text-white text-[11px] px-4 py-2 rounded-lg"
-              >
-                🔁 Reset Accounts
-              </button>
-            </div>
-          </>
-        ) : (
-          // SUPER ADMIN SETUP FORM
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 text-xs space-y-3">
-            <form onSubmit={handleFirstSetup} className="space-y-3">
+        <form onSubmit={handleSubmit} className="space-y-3 text-xs">
+          {mode === "signup" && (
+            <>
               <div>
-                <label className="block text-[11px] mb-1">Full Name</label>
+                <label className="block text-[11px] text-slate-400 mb-1">
+                  Full Name
+                </label>
                 <input
-                  className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-[11px]"
-                  value={setupName}
-                  onChange={(e) => setSetupName(e.target.value)}
+                  className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
+                  value={fullName}
+                  onChange={(e) => setFullName(e.target.value)}
+                  placeholder="John Doe"
                 />
               </div>
-
               <div>
-                <label className="block text-[11px] mb-1">Email</label>
-                <input
-                  type="email"
-                  className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-[11px]"
-                  value={setupEmail}
-                  onChange={(e) => setSetupEmail(e.target.value)}
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block text-[11px] mb-1">Password</label>
-                  <input
-                    type="password"
-                    className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-[11px]"
-                    value={setupPassword}
-                    onChange={(e) => setSetupPassword(e.target.value)}
-                  />
-                </div>
-                <div>
-                  <label className="block text-[11px] mb-1">
-                    Confirm Password
-                  </label>
-                  <input
-                    type="password"
-                    className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-[11px]"
-                    value={setupPassword2}
-                    onChange={(e) => setSetupPassword2(e.target.value)}
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-[11px] mb-1">Home Building</label>
+                <label className="block text-[11px] text-slate-400 mb-1">
+                  Home Building
+                </label>
                 <select
-                  className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-[11px]"
-                  value={setupBuilding}
-                  onChange={(e) => setSetupBuilding(e.target.value)}
+                  className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
+                  value={building}
+                  onChange={(e) => setBuilding(e.target.value)}
                 >
                   <option value="DC1">DC1</option>
                   <option value="DC5">DC5</option>
@@ -315,28 +192,68 @@ export default function AuthPage() {
                   <option value="DC18">DC18</option>
                 </select>
               </div>
+            </>
+          )}
 
-              {setupError && (
-                <div className="text-[11px] text-rose-300 bg-rose-900/40 border border-rose-700/70 rounded-lg px-3 py-2">
-                  {setupError}
-                </div>
-              )}
-
-              <button
-                type="submit"
-                className="w-full bg-emerald-600 hover:bg-emerald-500 rounded-lg py-2 text-[11px] font-semibold"
-              >
-                Create Super Admin & Continue
-              </button>
-            </form>
+          <div>
+            <label className="block text-[11px] text-slate-400 mb-1">
+              Email
+            </label>
+            <input
+              type="email"
+              className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="john.doe@example.com"
+            />
           </div>
-        )}
 
-        <div className="text-center text-[10px] text-slate-600">
-          <Link href="/" className="hover:text-sky-300 hover:underline">
-            Back to site
-          </Link>
-        </div>
+          <div>
+            <label className="block text-[11px] text-slate-400 mb-1">
+              Password
+            </label>
+            <input
+              type="password"
+              className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="Enter a secure password"
+            />
+          </div>
+
+          {mode === "signup" && (
+            <div>
+              <label className="block text-[11px] text-slate-400 mb-1">
+                Confirm Password
+              </label>
+              <input
+                type="password"
+                className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
+                value={password2}
+                onChange={(e) => setPassword2(e.target.value)}
+                placeholder="Re-enter your password"
+              />
+            </div>
+          )}
+
+          {error && (
+            <div className="text-[11px] text-rose-300 bg-rose-950/40 border border-rose-700/60 rounded-lg px-3 py-2">
+              {error}
+            </div>
+          )}
+
+          <button
+            type="submit"
+            disabled={loading}
+            className="mt-1 w-full rounded-lg bg-sky-600 hover:bg-sky-500 disabled:opacity-60 text-[11px] font-medium text-white px-4 py-2"
+          >
+            {loading
+              ? "Working..."
+              : mode === "login"
+              ? "Log In"
+              : "Create Account"}
+          </button>
+        </form>
       </div>
     </div>
   );

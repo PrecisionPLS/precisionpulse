@@ -1,5 +1,6 @@
 "use client";
 
+import { supabase } from "@/lib/supabaseClient";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -231,12 +232,11 @@ export default function Page() {
   const buildingLabel =
     buildingFilter === "ALL" ? "All Buildings" : buildingFilter;
 
-  function handleLogout() {
-    if (typeof window !== "undefined") {
-      window.localStorage.removeItem("precisionpulse_currentUser");
-    }
+  // ✅ New Supabase-based logout
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
     router.push("/auth");
-  }
+  };
 
   // While useCurrentUser is redirecting, don't flash the dashboard
   if (!currentUser) {
@@ -264,7 +264,7 @@ export default function Page() {
             </div>
           </div>
 
-                    <nav className="space-y-1 text-sm">
+          <nav className="space-y-1 text-sm">
             <Link
               href="/"
               className="block px-3 py-2 rounded-lg bg-slate-900 text-slate-50 shadow-sm shadow-slate-900/60 border border-slate-800 transition-colors"
@@ -349,14 +349,14 @@ export default function Page() {
             >
               Admin / Backup
             </Link>
-              {currentUser.accessRole === "Super Admin" && (
-  <Link
-    href="/user-accounts"
-    className="block px-3 py-2 rounded-lg text-slate-200 hover:bg-slate-800 hover:text-sky-200 transition-colors border border-slate-700/80"
-  >
-    User Accounts
-  </Link>
-)}
+            {currentUser.accessRole === "Super Admin" && (
+              <Link
+                href="/user-accounts"
+                className="block px-3 py-2 rounded-lg text-slate-200 hover:bg-slate-800 hover:text-sky-200 transition-colors border border-slate-700/80"
+              >
+                User Accounts
+              </Link>
+            )}
           </nav>
         </aside>
 
@@ -393,18 +393,16 @@ export default function Page() {
                     {currentUser.building || "No building set"}
                   </div>
                 </div>
+                {/* ✅ Logout button */}
                 <button
-                  type="button"
                   onClick={handleLogout}
-                  className="text-[11px] px-3 py-1.5 rounded-full border border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800"
+                  className="rounded-full border border-slate-700 px-3 py-1.5 text-[11px] text-slate-200 hover:bg-slate-800"
                 >
                   Log out
                 </button>
               </div>
               <div className="flex items-center gap-2">
-                <span className="text-[11px] text-slate-500">
-                  View:
-                </span>
+                <span className="text-[11px] text-slate-500">View:</span>
                 <select
                   className="rounded-lg bg-slate-900 border border-slate-700 px-3 py-1.5 text-xs text-slate-50 shadow-sm shadow-slate-900/50"
                   value={buildingFilter}
