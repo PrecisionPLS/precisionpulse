@@ -1,7 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, FormEvent } from "react";
+import { supabase } from "@/lib/supabaseClient";
+import { useCurrentUser } from "@/lib/useCurrentUser";
 
 const WORKFORCE_KEY = "precisionpulse_workforce";
 
@@ -44,41 +46,45 @@ type WorkforcePerson = {
   createdAt: string;
 };
 
-function normalizePerson(raw: any): WorkforcePerson {
-  const id =
-    String(raw?.id ?? raw?.workerId ?? raw?.email ?? Date.now());
-  const name = String(
-    raw?.name ??
-      raw?.fullName ??
-      raw?.displayName ??
-      raw?.email ??
-      "Unnamed Worker"
-  );
-  const createdAt =
-    raw?.createdAt ??
-    raw?.onboardedAt ??
-    new Date().toISOString();
+// Row shape in Supabase "workforce" table
+type WorkforceRow = {
+  id: string;
+  created_at: string;
+  name: string | null;
+  job_role: string | null;
+  access_role: string | null;
+  building: string | null;
+  status: string | null;
+  rate_type: string | null;
+  rate_value: number | null;
+  notes: string | null;
+};
+
+function rowToPerson(row: WorkforceRow): WorkforcePerson {
+  const createdAt = row.created_at ?? new Date().toISOString();
+  const rateTypeRaw = row.rate_type ?? "";
+  const rateType: "Hourly" | "Production" | "" =
+    rateTypeRaw === "Hourly" || rateTypeRaw === "Production"
+      ? (rateTypeRaw as "Hourly" | "Production")
+      : "";
 
   return {
-    id,
-    name,
-    role: raw?.role ?? raw?.position ?? "",
-    accessRole: raw?.accessRole ?? raw?.systemRole ?? "",
-    building: raw?.building ?? raw?.assignedBuilding ?? "DC18",
-    status: raw?.status ?? "Active",
-    rateType: raw?.rateType ?? "",
-    rateValue:
-      typeof raw?.rateValue === "number"
-        ? raw.rateValue
-        : raw?.rateValue
-        ? Number(raw.rateValue)
-        : null,
-    notes: raw?.notes ?? "",
+    id: String(row.id),
+    name: row.name ?? "Unnamed Worker",
+    role: row.job_role ?? "",
+    accessRole: row.access_role ?? "",
+    building: row.building ?? "DC18",
+    status: row.status ?? "Active",
+    rateType,
+    rateValue: row.rate_value,
+    notes: row.notes ?? "",
     createdAt,
   };
 }
 
 export default function WorkforcePage() {
+  const currentUser = useCurrentUser();
+
   const [people, setPeople] = useState<WorkforcePerson[]>([]);
 
   // form state
@@ -97,23 +103,11 @@ export default function WorkforcePage() {
   const [filterStatus, setFilterStatus] = useState<string>("ALL");
   const [search, setSearch] = useState<string>("");
 
-  useEffect(() => {
-    if (typeof window === "undefined") return;
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-    try {
-      const raw = window.localStorage.getItem(WORKFORCE_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        const normalized: WorkforcePerson[] = Array.isArray(parsed)
-          ? parsed.map(normalizePerson)
-          : [];
-        setPeople(normalized);
-      }
-    } catch (e) {
-      console.error("Failed to load workforce", e);
-    }
-  }, []);
-
+  // Persist into localStorage so dashboard/reports keep working
   function persist(next: WorkforcePerson[]) {
     setPeople(next);
     if (typeof window !== "undefined") {
@@ -121,12 +115,46 @@ export default function WorkforcePage() {
     }
   }
 
+  async function refreshFromSupabase() {
+    if (!currentUser) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const { data, error } = await supabase
+        .from("workforce")
+        .select("*")
+        .order("name", { ascending: true });
+
+      if (error) {
+        console.error("Error loading workforce", error);
+        setError("Failed to load workforce from server.");
+        return;
+      }
+
+      const rows: WorkforceRow[] = (data || []) as WorkforceRow[];
+      const mapped = rows.map(rowToPerson);
+      persist(mapped);
+    } catch (e) {
+      console.error("Unexpected error loading workforce", e);
+      setError("Unexpected error loading workforce.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // Load from Supabase once we know who is logged in
+  useEffect(() => {
+    if (!currentUser) return;
+    refreshFromSupabase();
+  }, [currentUser]);
+
+  // Form helpers
   function resetForm() {
     setEditingId(null);
     setName("");
     setRole("");
     setAccessRole("");
-    setBuilding("DC18");
+    setBuilding(currentUser?.building || "DC18");
     setStatus("Active");
     setRateType("");
     setRateValue("");
@@ -147,7 +175,7 @@ export default function WorkforcePage() {
     setNotes(person.notes ?? "");
   }
 
-  function handleDelete(person: WorkforcePerson) {
+  async function handleDelete(person: WorkforcePerson) {
     if (typeof window !== "undefined") {
       const ok = window.confirm(
         `Remove ${person.name} from the workforce roster? This does NOT delete historical container records; it only removes them from this roster list.`
@@ -155,16 +183,36 @@ export default function WorkforcePage() {
       if (!ok) return;
     }
 
-    const next = people.filter((p) => p.id !== person.id);
-    persist(next);
+    setSaving(true);
+    setError(null);
 
-    if (editingId === person.id) {
-      resetForm();
+    try {
+      const { error } = await supabase
+        .from("workforce")
+        .delete()
+        .eq("id", person.id);
+
+      if (error) {
+        console.error("Error deleting workforce record", error);
+        setError("Failed to delete worker.");
+        return;
+      }
+
+      await refreshFromSupabase();
+      if (editingId === person.id) {
+        resetForm();
+      }
+    } catch (e) {
+      console.error("Unexpected error deleting worker", e);
+      setError("Unexpected error deleting worker.");
+    } finally {
+      setSaving(false);
     }
   }
 
-  function handleSubmit(e: React.FormEvent) {
+  async function handleSubmit(e: FormEvent) {
     e.preventDefault();
+    if (saving) return;
 
     if (!name.trim()) {
       if (typeof window !== "undefined") {
@@ -172,8 +220,6 @@ export default function WorkforcePage() {
       }
       return;
     }
-
-    const nowIso = new Date().toISOString();
 
     const parsedRate =
       rateValue.trim() === "" ? null : Number(rateValue);
@@ -184,40 +230,49 @@ export default function WorkforcePage() {
       return;
     }
 
-    if (editingId) {
-      const next = people.map((p) =>
-        p.id === editingId
-          ? {
-              ...p,
-              name: name.trim(),
-              role: role.trim(),
-              accessRole: accessRole || "",
-              building,
-              status,
-              rateType,
-              rateValue: parsedRate,
-              notes: notes.trim(),
-            }
-          : p
-      );
-      persist(next);
-    } else {
-      const newPerson: WorkforcePerson = {
-        id: String(Date.now()),
+    setSaving(true);
+    setError(null);
+
+    try {
+      const payload = {
         name: name.trim(),
-        role: role.trim(),
-        accessRole: accessRole || "",
+        job_role: role.trim() || null,
+        access_role: accessRole || null,
         building,
         status,
-        rateType,
-        rateValue: parsedRate,
-        notes: notes.trim(),
-        createdAt: nowIso,
+        rate_type: rateType || null,
+        rate_value: parsedRate,
+        notes: notes.trim() || null,
       };
-      persist([newPerson, ...people]);
-    }
 
-    resetForm();
+      if (editingId) {
+        const { error } = await supabase
+          .from("workforce")
+          .update(payload)
+          .eq("id", editingId);
+
+        if (error) {
+          console.error("Error updating workforce record", error);
+          setError("Failed to update worker.");
+          return;
+        }
+      } else {
+        const { error } = await supabase.from("workforce").insert(payload);
+        if (error) {
+          console.error("Error inserting workforce record", error);
+          setError("Failed to add worker.");
+          return;
+        }
+      }
+
+      await refreshFromSupabase();
+      resetForm();
+    } catch (e) {
+      console.error("Unexpected error saving worker", e);
+      setError("Unexpected error saving worker.");
+    } finally {
+      setSaving(false);
+    }
   }
 
   const displayedPeople = useMemo(() => {
@@ -250,6 +305,21 @@ export default function WorkforcePage() {
   const totalBuildingManagers = people.filter(
     (p) => p.accessRole === "Building Manager"
   ).length;
+
+  // Protect route AFTER all hooks
+  if (!currentUser) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-400 flex flex-col items-center justify-center text-sm gap-2">
+        <div>Redirecting to login…</div>
+        <a
+          href="/auth"
+          className="text-sky-400 text-xs underline hover:text-sky-300"
+        >
+          Click here if you are not redirected.
+        </a>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-950 to-slate-900 text-slate-50">
@@ -309,6 +379,13 @@ export default function WorkforcePage() {
             </div>
           </div>
         </div>
+
+        {/* Error notice */}
+        {error && (
+          <div className="rounded-lg border border-rose-700 bg-rose-950/40 px-3 py-2 text-[11px] text-rose-100">
+            {error}
+          </div>
+        )}
 
         {/* Form + list */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -465,9 +542,14 @@ export default function WorkforcePage() {
 
               <button
                 type="submit"
-                className="mt-1 w-full rounded-lg bg-sky-600 hover:bg-sky-500 text-[11px] font-medium text-white px-4 py-2"
+                disabled={saving}
+                className="mt-1 w-full rounded-lg bg-sky-600 hover:bg-sky-500 disabled:opacity-60 text-[11px] font-medium text-white px-4 py-2"
               >
-                {editingId ? "Save Changes" : "Add Worker"}
+                {saving
+                  ? "Saving…"
+                  : editingId
+                  ? "Save Changes"
+                  : "Add Worker"}
               </button>
             </form>
           </div>
@@ -549,6 +631,11 @@ export default function WorkforcePage() {
                   />
                 </div>
               </div>
+              {loading && (
+                <div className="mt-2 text-[11px] text-slate-500">
+                  Loading workforce…
+                </div>
+              )}
             </div>
 
             {/* Table */}
@@ -614,11 +701,11 @@ export default function WorkforcePage() {
                             : "bg-slate-900/80 text-slate-200 border border-slate-600/70";
 
                         const rateLabel =
-  !p.rateType
-    ? "—"
-    : p.rateValue != null
-    ? `${p.rateType} $${p.rateValue.toFixed(2)}`
-    : p.rateType;
+                          !p.rateType
+                            ? "—"
+                            : p.rateValue != null
+                            ? `${p.rateType} $${p.rateValue.toFixed(2)}`
+                            : p.rateType;
 
                         return (
                           <tr
@@ -663,6 +750,7 @@ export default function WorkforcePage() {
                                   type="button"
                                   onClick={() => handleEdit(p)}
                                   className="text-[11px] text-sky-300 hover:underline"
+                                  disabled={saving}
                                 >
                                   Edit
                                 </button>
@@ -670,6 +758,7 @@ export default function WorkforcePage() {
                                   type="button"
                                   onClick={() => handleDelete(p)}
                                   className="text-[11px] text-rose-300 hover:underline"
+                                  disabled={saving}
                                 >
                                   Delete
                                 </button>

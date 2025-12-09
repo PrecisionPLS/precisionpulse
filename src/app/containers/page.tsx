@@ -8,7 +8,7 @@ import { useRouter } from "next/navigation";
 const CONTAINERS_KEY = "precisionpulse_containers";
 const BUILDINGS = ["DC1", "DC5", "DC11", "DC14", "DC18"];
 
-// Shape we store inside Supabase "workers" JSON
+// Workers stored in Supabase JSON
 type WorkerContribution = {
   name: string;
   minutesWorked: number;
@@ -27,6 +27,7 @@ type ContainerRow = {
   workers: WorkerContribution[];
   damage_pieces: number;
   rework_pieces: number;
+  work_order_id: string | null;
 };
 
 type EditFormState = {
@@ -35,7 +36,15 @@ type EditFormState = {
   containerNo: string;
   piecesTotal: number;
   skusTotal: number;
+  workOrderId: string | null;
   workers: WorkerContribution[];
+};
+
+type WorkOrderOption = {
+  id: string;
+  name: string;
+  building: string;
+  status: string;
 };
 
 function calculateContainerPay(pieces: number): number {
@@ -45,7 +54,6 @@ function calculateContainerPay(pieces: number): number {
   if (pieces <= 3500) return 180;
   if (pieces <= 5500) return 230;
   if (pieces <= 7500) return 280;
-  // 7501+ → 280 + ($0.05 × pieces above 7500)
   const extra = pieces - 7500;
   return 280 + extra * 0.05;
 }
@@ -60,12 +68,15 @@ export default function ContainersPage() {
   const [error, setError] = useState<string | null>(null);
 
   const [containers, setContainers] = useState<ContainerRow[]>([]);
+  const [workOrders, setWorkOrders] = useState<WorkOrderOption[]>([]);
+
   const [showForm, setShowForm] = useState(false);
   const [formState, setFormState] = useState<EditFormState>({
     building: "DC18",
     containerNo: "",
     piecesTotal: 0,
     skusTotal: 0,
+    workOrderId: null,
     workers: [
       { name: "", minutesWorked: 0, percentContribution: 0, payout: 0 },
       { name: "", minutesWorked: 0, percentContribution: 0, payout: 0 },
@@ -74,18 +85,25 @@ export default function ContainersPage() {
     ],
   });
 
-  // Load containers from Supabase (and sync to localStorage) after we know auth state
+  // Load containers from Supabase and sync to localStorage
   useEffect(() => {
-    if (!currentUser) return; // don't load until we know user
+    if (!currentUser) return;
 
     async function loadContainers() {
       setLoading(true);
       setError(null);
       try {
-        const { data, error } = await supabase
-          .from("containers")
-          .select("*")
-          .order("created_at", { ascending: false });
+        let query = supabase
+  .from("containers")
+  .select("*")
+  .order("created_at", { ascending: false });
+
+// If this user is a Lead, only show containers for their building
+if (currentUser?.accessRole === "Lead" && currentUser.building) {
+  query = query.eq("building", currentUser.building);
+}
+
+const { data, error } = await query;
 
         if (error) {
           console.error("Error loading containers", error);
@@ -97,11 +115,12 @@ export default function ContainersPage() {
           (data as any as ContainerRow[])?.map((row) => ({
             ...row,
             workers: (row.workers || []) as WorkerContribution[],
+            work_order_id: row.work_order_id ?? null,
           })) ?? [];
 
         setContainers(rows);
 
-        // Also sync into localStorage so Dashboard/Reports still work
+        // Sync to localStorage so Dashboard/Reports/Work Orders still work
         try {
           const mappedForLocal = rows.map((row) => ({
             id: row.id,
@@ -111,6 +130,7 @@ export default function ContainersPage() {
             piecesTotal: row.pieces_total,
             skusTotal: row.skus_total,
             containerPayTotal: row.pay_total,
+            workOrderId: row.work_order_id, // <-- for Work Orders page
             workers: row.workers || [],
           }));
           if (typeof window !== "undefined") {
@@ -131,6 +151,41 @@ export default function ContainersPage() {
     }
 
     loadContainers();
+  }, [currentUser]);
+
+  // Load work orders for the Work Order dropdown (only once we know user)
+  useEffect(() => {
+    if (!currentUser) return;
+
+    async function loadWorkOrders() {
+      try {
+        const { data, error } = await supabase
+          .from("work_orders")
+          .select("id, building, status, work_order_code, created_at")
+          .order("created_at", { ascending: false });
+
+        if (error) {
+          console.error("Error loading work orders for container form", error);
+          return;
+        }
+
+        const opts: WorkOrderOption[] =
+          (data || []).map((row: any) => ({
+            id: row.id as string,
+            name:
+              (row.work_order_code as string | null) ??
+              `Work Order ${String(row.id).slice(-4)}`,
+            building: (row.building as string | null) ?? "DC1",
+            status: (row.status as string | null) ?? "Pending",
+          })) ?? [];
+
+        setWorkOrders(opts);
+      } catch (e) {
+        console.error("Unexpected error loading work orders for container form", e);
+      }
+    }
+
+    loadWorkOrders();
   }, [currentUser]);
 
   const filteredContainers = useMemo(() => {
@@ -160,6 +215,7 @@ export default function ContainersPage() {
       containerNo: "",
       piecesTotal: 0,
       skusTotal: 0,
+      workOrderId: null,
       workers: [
         { name: "", minutesWorked: 0, percentContribution: 0, payout: 0 },
         { name: "", minutesWorked: 0, percentContribution: 0, payout: 0 },
@@ -181,6 +237,7 @@ export default function ContainersPage() {
       containerNo: row.container_no,
       piecesTotal: row.pieces_total,
       skusTotal: row.skus_total,
+      workOrderId: row.work_order_id ?? null,
       workers: (row.workers || []).concat(
         Array(Math.max(0, 4 - (row.workers?.length || 0))).fill({
           name: "",
@@ -256,7 +313,6 @@ export default function ContainersPage() {
       return;
     }
 
-    // Filter out empty workers
     const finalWorkers = workersWithPayout.filter(
       (w) => w.name.trim() && w.percentContribution > 0
     );
@@ -269,7 +325,7 @@ export default function ContainersPage() {
     setSaving(true);
 
     try {
-      const payload = {
+      const payload: any = {
         building: formState.building,
         container_no: formState.containerNo.trim(),
         pieces_total: formState.piecesTotal,
@@ -278,6 +334,7 @@ export default function ContainersPage() {
         damage_pieces: 0,
         rework_pieces: 0,
         workers: finalWorkers,
+        work_order_id: formState.workOrderId || null,
       };
 
       if (formState.id) {
@@ -313,6 +370,7 @@ export default function ContainersPage() {
           (data as any as ContainerRow[])?.map((row) => ({
             ...row,
             workers: (row.workers || []) as WorkerContribution[],
+            work_order_id: row.work_order_id ?? null,
           })) ?? [];
         setContainers(rows);
 
@@ -325,6 +383,7 @@ export default function ContainersPage() {
             piecesTotal: row.pieces_total,
             skusTotal: row.skus_total,
             containerPayTotal: row.pay_total,
+            workOrderId: row.work_order_id,
             workers: row.workers || [],
           }));
           if (typeof window !== "undefined") {
@@ -364,7 +423,6 @@ export default function ContainersPage() {
       const updated = containers.filter((c) => c.id !== id);
       setContainers(updated);
 
-      // Sync localStorage after delete
       try {
         const mappedForLocal = updated.map((row) => ({
           id: row.id,
@@ -374,6 +432,7 @@ export default function ContainersPage() {
           piecesTotal: row.pieces_total,
           skusTotal: row.skus_total,
           containerPayTotal: row.pay_total,
+          workOrderId: row.work_order_id,
           workers: row.workers || [],
         }));
         if (typeof window !== "undefined") {
@@ -393,7 +452,7 @@ export default function ContainersPage() {
     }
   }
 
-  // 🔒 Protect route AFTER all hooks, so we don't break hook order
+  // Protect route AFTER hooks
   if (!currentUser) {
     return (
       <div className="min-h-screen bg-slate-950 text-slate-400 flex flex-col items-center justify-center text-sm gap-2">
@@ -408,6 +467,11 @@ export default function ContainersPage() {
     );
   }
 
+  // Work orders filtered by selected building for the dropdown
+  const workOrdersForBuilding = workOrders.filter(
+    (wo) => wo.building === formState.building
+  );
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-950 to-slate-900 text-slate-50">
       <div className="mx-auto max-w-6xl px-4 py-6 space-y-6">
@@ -418,8 +482,8 @@ export default function ContainersPage() {
               Containers
             </h1>
             <p className="text-sm text-slate-400">
-              Live container tracking with automatic pay scale and worker
-              contributions.
+              Live container tracking with automatic pay scale, work orders, and
+              worker contributions.
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -499,6 +563,7 @@ export default function ContainersPage() {
                   <th className="text-left py-2 pr-3">Date</th>
                   <th className="text-left py-2 pr-3">Building</th>
                   <th className="text-left py-2 pr-3">Container #</th>
+                  <th className="text-left py-2 pr-3">Work Order</th>
                   <th className="text-right py-2 pr-3">Pieces</th>
                   <th className="text-right py-2 pr-3">SKUs</th>
                   <th className="text-right py-2 pr-3">Pay Total</th>
@@ -510,66 +575,75 @@ export default function ContainersPage() {
                 {filteredContainers.length === 0 && !loading && (
                   <tr>
                     <td
-                      colSpan={8}
+                      colSpan={9}
                       className="py-3 text-center text-[11px] text-slate-500"
                     >
                       No containers found for this filter.
                     </td>
                   </tr>
                 )}
-                {filteredContainers.map((c) => (
-                  <tr
-                    key={c.id}
-                    className="border-b border-slate-800/60 hover:bg-slate-900/70"
-                  >
-                    <td className="py-2 pr-3 text-[11px] text-slate-400">
-                      {new Date(c.created_at).toLocaleString()}
-                    </td>
-                    <td className="py-2 pr-3 text-[11px] text-slate-200">
-                      {c.building}
-                    </td>
-                    <td className="py-2 pr-3 text-[11px] text-slate-200">
-                      {c.container_no}
-                    </td>
-                    <td className="py-2 pr-3 text-right text-[11px] text-slate-200">
-                      {c.pieces_total}
-                    </td>
-                    <td className="py-2 pr-3 text-right text-[11px] text-slate-200">
-                      {c.skus_total}
-                    </td>
-                    <td className="py-2 pr-3 text-right text-[11px] text-emerald-300">
-                      ${Number(c.pay_total).toFixed(2)}
-                    </td>
-                    <td className="py-2 pr-3 text-[11px] text-slate-300">
-                      {(c.workers || [])
-                        .filter((w) => w.name)
-                        .map(
-                          (w) =>
-                            `${w.name} (${w.percentContribution}% · $${w.payout.toFixed(
-                              2
-                            )})`
-                        )
-                        .join(", ") || "—"}
-                    </td>
-                    <td className="py-2 pl-3 text-right">
-                      <div className="inline-flex gap-2">
-                        <button
-                          className="px-3 py-1 rounded-lg bg-slate-800 text-[11px] text-slate-100 hover:bg-slate-700"
-                          onClick={() => openEditForm(c)}
-                        >
-                          Edit
-                        </button>
-                        <button
-                          className="px-3 py-1 rounded-lg bg-rose-700 text-[11px] text-white hover:bg-rose-600"
-                          onClick={() => handleDelete(c.id)}
-                          disabled={saving}
-                        >
-                          Delete
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
+                {filteredContainers.map((c) => {
+                  const workOrderName =
+                    workOrders.find((wo) => wo.id === c.work_order_id)?.name ||
+                    (c.work_order_id ? c.work_order_id.slice(0, 8) : "—");
+
+                  return (
+                    <tr
+                      key={c.id}
+                      className="border-b border-slate-800/60 hover:bg-slate-900/70"
+                    >
+                      <td className="py-2 pr-3 text-[11px] text-slate-400">
+                        {new Date(c.created_at).toLocaleString()}
+                      </td>
+                      <td className="py-2 pr-3 text-[11px] text-slate-200">
+                        {c.building}
+                      </td>
+                      <td className="py-2 pr-3 text-[11px] text-slate-200">
+                        {c.container_no}
+                      </td>
+                      <td className="py-2 pr-3 text-[11px] text-slate-300">
+                        {workOrderName}
+                      </td>
+                      <td className="py-2 pr-3 text-right text-[11px] text-slate-200">
+                        {c.pieces_total}
+                      </td>
+                      <td className="py-2 pr-3 text-right text-[11px] text-slate-200">
+                        {c.skus_total}
+                      </td>
+                      <td className="py-2 pr-3 text-right text-[11px] text-emerald-300">
+                        ${Number(c.pay_total).toFixed(2)}
+                      </td>
+                      <td className="py-2 pr-3 text-[11px] text-slate-300">
+                        {(c.workers || [])
+                          .filter((w) => w.name)
+                          .map(
+                            (w) =>
+                              `${w.name} (${w.percentContribution}% · $${w.payout.toFixed(
+                                2
+                              )})`
+                          )
+                          .join(", ") || "—"}
+                      </td>
+                      <td className="py-2 pl-3 text-right">
+                        <div className="inline-flex gap-2">
+                          <button
+                            className="px-3 py-1 rounded-lg bg-slate-800 text-[11px] text-slate-100 hover:bg-slate-700"
+                            onClick={() => openEditForm(c)}
+                          >
+                            Edit
+                          </button>
+                          <button
+                            className="px-3 py-1 rounded-lg bg-rose-700 text-[11px] text-white hover:bg-rose-600"
+                            onClick={() => handleDelete(c.id)}
+                            disabled={saving}
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -607,6 +681,8 @@ export default function ContainersPage() {
                         setFormState((prev) => ({
                           ...prev,
                           building: e.target.value,
+                          // when building changes, clear work order selection
+                          workOrderId: null,
                         }))
                       }
                     >
@@ -667,6 +743,33 @@ export default function ContainersPage() {
                       min={0}
                     />
                   </div>
+                </div>
+
+                {/* Work Order select */}
+                <div>
+                  <label className="block text-[11px] text-slate-400 mb-1">
+                    Work Order (optional)
+                  </label>
+                  <select
+                    className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
+                    value={formState.workOrderId || ""}
+                    onChange={(e) =>
+                      setFormState((prev) => ({
+                        ...prev,
+                        workOrderId: e.target.value || null,
+                      }))
+                    }
+                  >
+                    <option value="">Unassigned</option>
+                    {workOrdersForBuilding.map((wo) => (
+                      <option key={wo.id} value={wo.id}>
+                        {wo.name} ({wo.status})
+                      </option>
+                    ))}
+                  </select>
+                  <p className="mt-1 text-[10px] text-slate-500">
+                    Only work orders for this building are shown.
+                  </p>
                 </div>
 
                 <div className="rounded-xl bg-slate-900 border border-slate-800 p-3 space-y-2">

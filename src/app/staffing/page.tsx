@@ -2,581 +2,796 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
-
-const CONTAINERS_KEY = "precisionpulse_containers";
-const SHIFTS_KEY = "precisionpulse_shifts";
+import { supabase } from "@/lib/supabaseClient";
+import { useCurrentUser } from "@/lib/useCurrentUser";
 
 const BUILDINGS = ["DC1", "DC5", "DC11", "DC14", "DC18"];
 const SHIFTS = ["1st", "2nd", "3rd", "4th"];
 
-type WorkerAssignment = {
-  id: string;
-  workerId: string;
-  workerName: string;
-  role?: string;
-  minutesWorked: number;
-  percentContribution: number;
-  payout: number;
-};
-
-type ContainerRecord = {
-  id: string;
-  workOrderId?: string;
-  building: string;
-  shift: string;
-  containerNo: string;
-  piecesTotal: number;
-  skusTotal: number;
-  containerPayTotal: number;
-  createdAt: string;
-  workers: WorkerAssignment[];
-};
-
-type ShiftConfig = {
-  id: string;
-  building: string;
-  shift: string;
-  requiredStaff: number;
-  active?: boolean;
-};
-
-// Try to normalize shift configs from whatever the Shifts page stored
-function normalizeShift(raw: any): ShiftConfig {
-  const building =
-    raw?.building ||
-    raw?.buildingCode ||
-    raw?.assignedBuilding ||
-    "DC1";
-
-  const shift =
-    raw?.shift ||
-    raw?.shiftName ||
-    raw?.name ||
-    "1st";
-
-  const required =
-    Number(
-      raw?.requiredStaff ??
-        raw?.requiredStaffCount ??
-        raw?.staffRequired ??
-        raw?.headcountRequired
-    ) || 0;
-
-  return {
-    id: String(raw?.id ?? `${building}-${shift}`),
-    building,
-    shift,
-    requiredStaff: required,
-    active:
-      typeof raw?.active === "boolean"
-        ? raw.active
-        : raw?.status === "Active"
-        ? true
-        : true,
-  };
-}
-
-// Normalize containers to be safe
-function normalizeContainer(raw: any): ContainerRecord {
-  const pieces = Number(raw?.piecesTotal ?? 0) || 0;
-  const skus = Number(raw?.skusTotal ?? 0) || 0;
-  const workersRaw: any[] = Array.isArray(raw?.workers)
-    ? raw.workers
-    : [];
-
-  const workers: WorkerAssignment[] = workersRaw.map((w, idx) => ({
-    id: String(w.id ?? `worker-${idx}-${raw?.id ?? Date.now()}`),
-    workerId: String(w.workerId ?? ""),
-    workerName: String(w.workerName ?? w.name ?? "Unknown"),
-    role: w.role ?? "",
-    minutesWorked: Number(w.minutesWorked ?? 0) || 0,
-    percentContribution: Number(w.percentContribution ?? 0) || 0,
-    payout: Number(w.payout ?? 0) || 0,
-  }));
-
-  return {
-    id: String(raw?.id ?? Date.now()),
-    workOrderId: raw?.workOrderId,
-    building: raw?.building ?? "DC1",
-    shift: raw?.shift ?? "1st",
-    containerNo: raw?.containerNo ?? "",
-    piecesTotal: pieces,
-    skusTotal: skus,
-    containerPayTotal: Number(raw?.containerPayTotal ?? 0) || 0,
-    createdAt: raw?.createdAt ?? new Date().toISOString(),
-    workers,
-  };
-}
-
 type StaffingRow = {
+  id: string;
+  created_at: string;
+  date: string;
   building: string;
   shift: string;
-  requiredStaff: number;
-  actualWorkers: number;
-  diff: number;
-  status: "Under" | "Balanced" | "Over" | "No Target";
-  containers: number;
-  pieces: number;
+  required_total: number | null;
+  required_lumpers: number | null;
+  required_equipment: number | null;
+  required_leads: number | null;
+  notes: string | null;
 };
+
+type StaffingPlan = {
+  id: string;
+  createdAt: string;
+  date: string; // YYYY-MM-DD
+  building: string;
+  shift: string;
+  requiredTotal: number;
+  requiredLumpers: number;
+  requiredEquipment: number;
+  requiredLeads: number;
+  notes?: string;
+};
+
+type WorkforceRow = {
+  id: string;
+  building: string | null;
+  status: string | null;
+};
+
+type WorkforceSummary = {
+  building: string;
+  activeCount: number;
+};
+
+function rowToPlan(row: StaffingRow): StaffingPlan {
+  return {
+    id: row.id,
+    createdAt: row.created_at ?? new Date().toISOString(),
+    date: row.date,
+    building: row.building ?? "DC18",
+    shift: row.shift ?? "1st",
+    requiredTotal: row.required_total ?? 0,
+    requiredLumpers: row.required_lumpers ?? 0,
+    requiredEquipment: row.required_equipment ?? 0,
+    requiredLeads: row.required_leads ?? 0,
+    notes: row.notes ?? undefined,
+  };
+}
 
 export default function StaffingPage() {
-  const [containers, setContainers] = useState<ContainerRecord[]>([]);
-  const [shifts, setShifts] = useState<ShiftConfig[]>([]);
+  const currentUser = useCurrentUser();
 
-  const todayStr = new Date().toISOString().slice(0, 10);
+  const [plans, setPlans] = useState<StaffingPlan[]>([]);
+  const [workforceSummary, setWorkforceSummary] = useState<WorkforceSummary[]>(
+    []
+  );
 
-  const [date, setDate] = useState<string>(todayStr);
-  const [buildingFilter, setBuildingFilter] = useState<string>("ALL");
-  const [shiftFilter, setShiftFilter] = useState<string>("ALL");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
+
+  // Form state
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [date, setDate] = useState<string>(() =>
+    new Date().toISOString().slice(0, 10)
+  );
+  const [building, setBuilding] = useState<string>("DC18");
+  const [shift, setShift] = useState<string>("1st");
+  const [requiredTotal, setRequiredTotal] = useState<string>("0");
+  const [requiredLumpers, setRequiredLumpers] = useState<string>("0");
+  const [requiredEquipment, setRequiredEquipment] = useState<string>("0");
+  const [requiredLeads, setRequiredLeads] = useState<string>("0");
+  const [notes, setNotes] = useState<string>("");
+
+  // Filters
+  const [filterBuilding, setFilterBuilding] = useState<string>("ALL");
+  const [filterShift, setFilterShift] = useState<string>("ALL");
+  const [filterDateFrom, setFilterDateFrom] = useState<string>("");
+  const [filterDateTo, setFilterDateTo] = useState<string>("");
+
+  function resetForm() {
+    setEditingId(null);
+    setDate(new Date().toISOString().slice(0, 10));
+    setBuilding("DC18");
+    setShift("1st");
+    setRequiredTotal("0");
+    setRequiredLumpers("0");
+    setRequiredEquipment("0");
+    setRequiredLeads("0");
+    setNotes("");
+  }
+
+  async function loadStaffingPlans() {
+    setError(null);
+    try {
+      const { data, error } = await supabase
+        .from("staffing_plans")
+        .select("*")
+        .order("date", { ascending: true })
+        .order("building", { ascending: true })
+        .order("shift", { ascending: true });
+
+      if (error) {
+        console.error("Error loading staffing plans", error);
+        setError("Failed to load staffing plans from server.");
+        return;
+      }
+
+      const rows = (data || []) as StaffingRow[];
+      setPlans(rows.map(rowToPlan));
+    } catch (e) {
+      console.error("Unexpected error loading staffing plans", e);
+      setError("Unexpected error loading staffing plans.");
+    }
+  }
+
+  async function loadWorkforceSummary() {
+    setError(null);
+    try {
+      const { data, error } = await supabase
+        .from("workforce")
+        .select("id, building, status");
+
+      if (error) {
+        console.error("Error loading workforce for staffing", error);
+        // not fatal, we can still show plans
+        return;
+      }
+
+      const rows = (data || []) as WorkforceRow[];
+      const map: Record<string, number> = {};
+
+      for (const row of rows) {
+        const b = row.building ?? "Unknown";
+        const status = row.status ?? "";
+        if (status !== "Active") continue;
+        map[b] = (map[b] ?? 0) + 1;
+      }
+
+      const result: WorkforceSummary[] = Object.entries(map).map(
+        ([building, activeCount]) => ({
+          building,
+          activeCount,
+        })
+      );
+      setWorkforceSummary(result);
+    } catch (e) {
+      console.error("Unexpected error loading workforce for staffing", e);
+      // ignore, just means "actual" might be 0
+    }
+  }
+
+  async function refreshAll() {
+    setLoading(true);
+    await Promise.all([loadStaffingPlans(), loadWorkforceSummary()]);
+    setLoading(false);
+  }
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
+    if (!currentUser) return;
+    refreshAll();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentUser]);
 
-    // Load containers
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    setInfo(null);
+
+    if (!date.trim()) {
+      setError("Date is required.");
+      return;
+    }
+
+    const rt = Number(requiredTotal || "0");
+    const rl = Number(requiredLumpers || "0");
+    const re = Number(requiredEquipment || "0");
+    const rlead = Number(requiredLeads || "0");
+
+    if ([rt, rl, re, rlead].some((v) => Number.isNaN(v) || v < 0)) {
+      setError("Required counts must be non-negative numbers.");
+      return;
+    }
+
     try {
-      const raw = window.localStorage.getItem(CONTAINERS_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        const normalized = Array.isArray(parsed)
-          ? parsed.map(normalizeContainer)
-          : [];
-        setContainers(normalized);
-      }
-    } catch (e) {
-      console.error("Failed to load containers for staffing", e);
-    }
+      if (editingId) {
+        const { error } = await supabase
+          .from("staffing_plans")
+          .update({
+            date,
+            building,
+            shift,
+            required_total: rt,
+            required_lumpers: rl,
+            required_equipment: re,
+            required_leads: rlead,
+            notes: notes.trim() || null,
+          })
+          .eq("id", editingId);
 
-    // Load shift configs
-    try {
-      const raw = window.localStorage.getItem(SHIFTS_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        const normalized = Array.isArray(parsed)
-          ? parsed.map(normalizeShift)
-          : [];
-        setShifts(normalized);
-      }
-    } catch (e) {
-      console.error("Failed to load shifts for staffing", e);
-    }
-  }, []);
-
-  const staffingRows = useMemo<StaffingRow[]>(() => {
-    type Acc = {
-      building: string;
-      shift: string;
-      requiredStaff: number;
-      workerIds: Set<string>;
-      containers: number;
-      pieces: number;
-    };
-
-    const map = new Map<string, Acc>();
-
-    // Build a lookup of required staff from shift configs (per building+shift)
-    const requiredMap = new Map<string, number>();
-    for (const s of shifts) {
-      if (s.active === false) continue;
-      const key = `${s.building}::${s.shift}`;
-      requiredMap.set(key, s.requiredStaff || 0);
-    }
-
-    // Walk containers for the selected date and filters
-    for (const c of containers) {
-      const day = (c.createdAt || "").slice(0, 10);
-      if (date && day !== date) continue;
-
-      if (buildingFilter !== "ALL" && c.building !== buildingFilter) {
-        continue;
-      }
-
-      if (shiftFilter !== "ALL" && c.shift !== shiftFilter) {
-        continue;
-      }
-
-      const key = `${c.building}::${c.shift}`;
-      let acc = map.get(key);
-      if (!acc) {
-        acc = {
-          building: c.building,
-          shift: c.shift,
-          requiredStaff: requiredMap.get(key) ?? 0,
-          workerIds: new Set<string>(),
-          containers: 0,
-          pieces: 0,
-        };
-        map.set(key, acc);
-      }
-
-      acc.containers += 1;
-      acc.pieces += c.piecesTotal || 0;
-
-      for (const w of c.workers || []) {
-        const id = w.workerId || w.workerName;
-        if (id) acc.workerIds.add(id);
-      }
-    }
-
-    // Also include shift configs that might not yet have containers for the day
-    for (const s of shifts) {
-      if (buildingFilter !== "ALL" && s.building !== buildingFilter) {
-        continue;
-      }
-      if (shiftFilter !== "ALL" && s.shift !== shiftFilter) {
-        continue;
-      }
-      const key = `${s.building}::${s.shift}`;
-      if (!map.has(key)) {
-        map.set(key, {
-          building: s.building,
-          shift: s.shift,
-          requiredStaff: s.requiredStaff || 0,
-          workerIds: new Set<string>(),
-          containers: 0,
-          pieces: 0,
+        if (error) {
+          console.error("Error updating staffing plan", error);
+          setError("Failed to update staffing plan.");
+          return;
+        }
+        setInfo("Staffing plan updated.");
+      } else {
+        const { error } = await supabase.from("staffing_plans").insert({
+          date,
+          building,
+          shift,
+          required_total: rt,
+          required_lumpers: rl,
+          required_equipment: re,
+          required_leads: rlead,
+          notes: notes.trim() || null,
         });
+
+        if (error) {
+          console.error("Error inserting staffing plan", error);
+          setError("Failed to create staffing plan.");
+          return;
+        }
+        setInfo("Staffing plan created.");
       }
+
+      resetForm();
+      await refreshAll();
+    } catch (e) {
+      console.error("Unexpected error saving staffing plan", e);
+      setError("Unexpected error saving staffing plan.");
+    }
+  }
+
+  function handleEdit(plan: StaffingPlan) {
+    setEditingId(plan.id);
+    setDate(plan.date);
+    setBuilding(plan.building);
+    setShift(plan.shift);
+    setRequiredTotal(String(plan.requiredTotal));
+    setRequiredLumpers(String(plan.requiredLumpers));
+    setRequiredEquipment(String(plan.requiredEquipment));
+    setRequiredLeads(String(plan.requiredLeads));
+    setNotes(plan.notes ?? "");
+  }
+
+  async function handleDelete(plan: StaffingPlan) {
+    if (typeof window !== "undefined") {
+      const ok = window.confirm(
+        "Delete this staffing plan? This cannot be undone."
+      );
+      if (!ok) return;
     }
 
-    const rows: StaffingRow[] = [];
+    try {
+      const { error } = await supabase
+        .from("staffing_plans")
+        .delete()
+        .eq("id", plan.id);
 
-    for (const acc of map.values()) {
-      const actualWorkers = acc.workerIds.size;
-      const requiredStaff = acc.requiredStaff;
-      const diff = actualWorkers - requiredStaff;
-
-      let status: StaffingRow["status"] = "No Target";
-      if (requiredStaff > 0) {
-        if (actualWorkers < requiredStaff) status = "Under";
-        else if (actualWorkers === requiredStaff) status = "Balanced";
-        else status = "Over";
+      if (error) {
+        console.error("Error deleting staffing plan", error);
+        setError("Failed to delete staffing plan.");
+        return;
       }
 
-      rows.push({
-        building: acc.building,
-        shift: acc.shift,
-        requiredStaff,
-        actualWorkers,
-        diff,
-        status,
-        containers: acc.containers,
-        pieces: acc.pieces,
-      });
+      setInfo("Staffing plan deleted.");
+      if (editingId === plan.id) resetForm();
+      await refreshAll();
+    } catch (e) {
+      console.error("Unexpected error deleting staffing plan", e);
+      setError("Unexpected error deleting staffing plan.");
     }
+  }
 
-    // Sort by building then shift
-    rows.sort((a, b) => {
-      if (a.building === b.building) {
-        return a.shift.localeCompare(b.shift);
+  const actualByBuilding = useMemo(() => {
+    const map: Record<string, number> = {};
+    for (const w of workforceSummary) {
+      map[w.building] = w.activeCount;
+    }
+    return map;
+  }, [workforceSummary]);
+
+  const filteredPlans = useMemo(() => {
+    return plans.filter((p) => {
+      if (filterBuilding !== "ALL" && p.building !== filterBuilding) {
+        return false;
       }
-      return a.building.localeCompare(b.building);
+      if (filterShift !== "ALL" && p.shift !== filterShift) {
+        return false;
+      }
+      if (filterDateFrom && p.date < filterDateFrom) {
+        return false;
+      }
+      if (filterDateTo && p.date > filterDateTo) {
+        return false;
+      }
+      return true;
     });
+  }, [plans, filterBuilding, filterShift, filterDateFrom, filterDateTo]);
 
-    return rows;
-  }, [containers, shifts, date, buildingFilter, shiftFilter]);
+  const summary = useMemo(() => {
+    const total = plans.length;
+    let under = 0;
+    let over = 0;
+    const todayStr = new Date().toISOString().slice(0, 10);
+    let todayPlans = 0;
 
-  const totals = useMemo(() => {
-    const totalContainers = staffingRows.reduce(
-      (sum, r) => sum + r.containers,
-      0
-    );
-    const totalPieces = staffingRows.reduce(
-      (sum, r) => sum + r.pieces,
-      0
-    );
-    const requiredTotal = staffingRows.reduce(
-      (sum, r) => sum + r.requiredStaff,
-      0
-    );
-    const actualTotal = staffingRows.reduce(
-      (sum, r) => sum + r.actualWorkers,
-      0
-    );
-    return {
-      totalContainers,
-      totalPieces,
-      requiredTotal,
-      actualTotal,
-    };
-  }, [staffingRows]);
-
-  function statusBadge(row: StaffingRow) {
-    const base =
-      "inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium";
-
-    if (row.status === "Under") {
-      return (
-        <span className={`${base} bg-rose-900/40 text-rose-200 border border-rose-700`}>
-          Understaffed ({row.diff})
-        </span>
-      );
+    for (const p of plans) {
+      const actual = actualByBuilding[p.building] ?? 0;
+      const diff = actual - p.requiredTotal;
+      if (diff < 0) under++;
+      if (diff > 0) over++;
+      if (p.date === todayStr) todayPlans++;
     }
-    if (row.status === "Balanced") {
-      return (
-        <span
-          className={`${base} bg-emerald-900/40 text-emerald-200 border border-emerald-700`}
-        >
-          Balanced
-        </span>
-      );
-    }
-    if (row.status === "Over") {
-      return (
-        <span
-          className={`${base} bg-sky-900/40 text-sky-200 border border-sky-700`}
-        >
-          Overstaffed (+{row.diff})
-        </span>
-      );
-    }
+
+    return { total, under, over, todayPlans };
+  }, [plans, actualByBuilding]);
+
+  // Protect route after hooks
+  if (!currentUser) {
     return (
-      <span
-        className={`${base} bg-slate-900/60 text-slate-300 border border-slate-700`}
-      >
-        No target
-      </span>
+      <div className="min-h-screen bg-slate-950 text-slate-400 flex flex-col items-center justify-center text-sm gap-2">
+        <div>Redirecting to login…</div>
+        <a
+          href="/auth"
+          className="text-sky-400 text-xs underline hover:text-sky-300"
+        >
+          Click here if you are not redirected.
+        </a>
+      </div>
     );
   }
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-semibold text-slate-50">
-            Staffing Coverage
-          </h1>
-          <p className="text-sm text-slate-400">
-            Required vs actual staffing per building and shift based on
-            live containers and lumper assignments.
-          </p>
-        </div>
-        <Link
-          href="/"
-          className="text-xs px-3 py-1 rounded-full border border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800"
-        >
-          ← Back to Dashboard
-        </Link>
-      </div>
-
-      {/* Filters + summary */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Filters */}
-        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 text-xs space-y-3">
-          <div className="flex items-center justify-between">
-            <span className="text-slate-200 text-sm font-semibold">
-              Filters
-            </span>
-            <button
-              type="button"
-              onClick={() => {
-                setDate(todayStr);
-                setBuildingFilter("ALL");
-                setShiftFilter("ALL");
-              }}
-              className="text-[11px] text-sky-300 hover:underline"
-            >
-              Reset
-            </button>
-          </div>
-
+    <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-950 to-slate-900 text-slate-50">
+      <div className="mx-auto max-w-7xl p-6 space-y-6">
+        {/* Header */}
+        <div className="flex items-center justify-between gap-4">
           <div>
-            <label className="block text-[11px] text-slate-400 mb-1">
-              Date
-            </label>
-            <input
-              type="date"
-              className="w-full rounded-lg bg-slate-950 border border-slate-700 px-2 py-1.5 text-[11px] text-slate-50"
-              value={date}
-              onChange={(e) => setDate(e.target.value)}
-            />
+            <h1 className="text-2xl font-semibold text-slate-50">
+              Staffing Coverage
+            </h1>
+            <p className="text-sm text-slate-400">
+              Plan required headcount by building and shift, and compare
+              against active workers from the workforce roster.
+            </p>
           </div>
-
-          <div>
-            <label className="block text-[11px] text-slate-400 mb-1">
-              Building
-            </label>
-            <select
-              className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
-              value={buildingFilter}
-              onChange={(e) => setBuildingFilter(e.target.value)}
-            >
-              <option value="ALL">All Buildings</option>
-              {BUILDINGS.map((b) => (
-                <option key={b} value={b}>
-                  {b}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div>
-            <label className="block text-[11px] text-slate-400 mb-1">
-              Shift
-            </label>
-            <select
-              className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
-              value={shiftFilter}
-              onChange={(e) => setShiftFilter(e.target.value)}
-            >
-              <option value="ALL">All Shifts</option>
-              {SHIFTS.map((s) => (
-                <option key={s} value={s}>
-                  {s}
-                </option>
-              ))}
-            </select>
-          </div>
+          <Link
+            href="/"
+            className="text-xs px-3 py-1 rounded-full border border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800"
+          >
+            ← Back to Dashboard
+          </Link>
         </div>
 
-        {/* Summary cards */}
-        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 flex flex-col justify-between text-xs">
-          <div>
-            <div className="text-slate-400 mb-1">
-              Total Required vs Actual
-            </div>
-            <div className="text-2xl font-semibold text-slate-50">
-              {totals.actualTotal}{" "}
-              <span className="text-sm text-slate-400 font-normal">
-                actual
-              </span>
-            </div>
-            <div className="text-[11px] text-slate-500 mt-1">
-              Required:{" "}
-              <span className="text-slate-200">
-                {totals.requiredTotal}
-              </span>
-            </div>
-          </div>
-          <div className="mt-3 text-[11px] text-slate-500">
-            Difference:{" "}
-            <span
-              className={
-                totals.actualTotal > totals.requiredTotal
-                  ? "text-sky-300"
-                  : totals.actualTotal < totals.requiredTotal
-                  ? "text-rose-300"
-                  : "text-emerald-300"
-              }
-            >
-              {totals.actualTotal - totals.requiredTotal}
-            </span>
-          </div>
+        {/* Summary row */}
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 text-xs">
+          <SummaryCard label="Total Plans" value={summary.total} />
+          <SummaryCard
+            label="Understaffed Shifts"
+            value={summary.under}
+            accent="rose"
+          />
+          <SummaryCard
+            label="Overstaffed Shifts"
+            value={summary.over}
+            accent="amber"
+          />
+          <SummaryCard
+            label="Today’s Plans"
+            value={summary.todayPlans}
+            accent="sky"
+          />
         </div>
 
-        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-2 text-xs">
-          <div className="text-slate-400">Volume Snapshot</div>
-          <div className="flex justify-between mt-1">
-            <div>
-              <div className="text-[11px] text-slate-500">
-                Containers (day)
-              </div>
-              <div className="text-lg font-semibold text-slate-100">
-                {totals.totalContainers}
-              </div>
-            </div>
-            <div>
-              <div className="text-[11px] text-slate-500">
-                Pieces (day)
-              </div>
-              <div className="text-lg font-semibold text-slate-100">
-                {totals.totalPieces}
-              </div>
-            </div>
-          </div>
-          <div className="text-[11px] text-slate-500 mt-2">
-            Containers and pieces are calculated from containers on the
-            selected date and filters.
-          </div>
-        </div>
-      </div>
-
-      {/* Staffing table */}
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 text-xs">
-        <div className="flex items-center justify-between mb-3">
-          <div>
-            <div className="text-slate-200 text-sm font-semibold">
-              Staffing Coverage by Shift
-            </div>
-            <div className="text-[11px] text-slate-500">
-              Each row shows required vs actual headcount plus containers
-              and pieces for the day.
-            </div>
-          </div>
-        </div>
-
-        {staffingRows.length === 0 ? (
-          <p className="text-sm text-slate-500">
-            No staffing data for the current filters. Make sure shifts
-            are configured and containers with lumpers exist for this
-            date.
-          </p>
-        ) : (
-          <div className="overflow-auto max-h-[520px]">
-            <table className="min-w-full text-left border-collapse">
-              <thead>
-                <tr className="border-b border-slate-800 bg-slate-950/60">
-                  <th className="px-3 py-2 text-[11px] text-slate-400">
-                    Building
-                  </th>
-                  <th className="px-3 py-2 text-[11px] text-slate-400">
-                    Shift
-                  </th>
-                  <th className="px-3 py-2 text-[11px] text-slate-400 text-right">
-                    Required
-                  </th>
-                  <th className="px-3 py-2 text-[11px] text-slate-400 text-right">
-                    Actual
-                  </th>
-                  <th className="px-3 py-2 text-[11px] text-slate-400 text-right">
-                    Diff
-                  </th>
-                  <th className="px-3 py-2 text-[11px] text-slate-400">
-                    Status
-                  </th>
-                  <th className="px-3 py-2 text-[11px] text-slate-400 text-right">
-                    Containers
-                  </th>
-                  <th className="px-3 py-2 text-[11px] text-slate-400 text-right">
-                    Pieces
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {staffingRows.map((r) => (
-                  <tr
-                    key={`${r.building}-${r.shift}`}
-                    className="border-b border-slate-800/60 hover:bg-slate-900/60"
-                  >
-                    <td className="px-3 py-2 text-slate-100">
-                      {r.building}
-                    </td>
-                    <td className="px-3 py-2 text-slate-300">
-                      {r.shift}
-                    </td>
-                    <td className="px-3 py-2 text-right text-slate-200">
-                      {r.requiredStaff}
-                    </td>
-                    <td className="px-3 py-2 text-right text-slate-200">
-                      {r.actualWorkers}
-                    </td>
-                    <td className="px-3 py-2 text-right text-slate-200">
-                      {r.diff}
-                    </td>
-                    <td className="px-3 py-2">{statusBadge(r)}</td>
-                    <td className="px-3 py-2 text-right text-slate-200">
-                      {r.containers}
-                    </td>
-                    <td className="px-3 py-2 text-right text-slate-200">
-                      {r.pieces}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+        {/* Error/info + loading */}
+        {error && (
+          <div className="text-xs text-red-300 bg-red-950/40 border border-red-800 rounded px-3 py-2">
+            {error}
           </div>
         )}
+        {info && (
+          <div className="text-xs text-emerald-300 bg-emerald-950/40 border border-emerald-800 rounded px-3 py-2">
+            {info}
+          </div>
+        )}
+        {loading && (
+          <div className="text-xs text-slate-400">Loading staffing…</div>
+        )}
+
+        {/* Form + table */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          {/* Form */}
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 text-xs space-y-3">
+            <div className="flex items-center justify-between mb-1">
+              <div className="text-slate-200 text-sm font-semibold">
+                {editingId ? "Edit Staffing Plan" : "Create Staffing Plan"}
+              </div>
+              {editingId && (
+                <button
+                  type="button"
+                  onClick={resetForm}
+                  className="text-[11px] text-sky-300 hover:underline"
+                >
+                  Clear / New
+                </button>
+              )}
+            </div>
+
+            <form onSubmit={handleSubmit} className="space-y-3">
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-[11px] text-slate-400 mb-1">
+                    Date
+                  </label>
+                  <input
+                    type="date"
+                    className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
+                    value={date}
+                    onChange={(e) => setDate(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] text-slate-400 mb-1">
+                    Building
+                  </label>
+                  <select
+                    className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
+                    value={building}
+                    onChange={(e) => setBuilding(e.target.value)}
+                  >
+                    {BUILDINGS.map((b) => (
+                      <option key={b} value={b}>
+                        {b}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[11px] text-slate-400 mb-1">
+                  Shift
+                </label>
+                <select
+                  className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
+                  value={shift}
+                  onChange={(e) => setShift(e.target.value)}
+                >
+                  {SHIFTS.map((s) => (
+                    <option key={s} value={s}>
+                      {s}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-[11px] text-slate-400 mb-1">
+                    Required Total
+                  </label>
+                  <input
+                    className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
+                    value={requiredTotal}
+                    onChange={(e) => setRequiredTotal(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] text-slate-400 mb-1">
+                    Lumpers
+                  </label>
+                  <input
+                    className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
+                    value={requiredLumpers}
+                    onChange={(e) =>
+                      setRequiredLumpers(e.target.value)
+                    }
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-[11px] text-slate-400 mb-1">
+                    Equipment Ops
+                  </label>
+                  <input
+                    className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
+                    value={requiredEquipment}
+                    onChange={(e) =>
+                      setRequiredEquipment(e.target.value)
+                    }
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] text-slate-400 mb-1">
+                    Leads
+                  </label>
+                  <input
+                    className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
+                    value={requiredLeads}
+                    onChange={(e) => setRequiredLeads(e.target.value)}
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[11px] text-slate-400 mb-1">
+                  Notes (optional)
+                </label>
+                <textarea
+                  rows={3}
+                  className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50 resize-none"
+                  placeholder="Example: Need 2 clamp ops, 1 shuttle, 1 zero-tolerance lead…"
+                  value={notes}
+                  onChange={(e) => setNotes(e.target.value)}
+                />
+              </div>
+
+              <button
+                type="submit"
+                className="mt-1 w-full rounded-lg bg-sky-600 hover:bg-sky-500 text-[11px] font-medium text-white px-4 py-2"
+              >
+                {editingId ? "Save Changes" : "Create Staffing Plan"}
+              </button>
+            </form>
+          </div>
+
+          {/* Filters + table */}
+          <div className="lg:col-span-2 space-y-4">
+            {/* Filters */}
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 text-xs">
+              <div className="flex items-center justify-between mb-3">
+                <div>
+                  <div className="text-slate-200 text-sm font-semibold">
+                    Filters
+                  </div>
+                  <div className="text-[11px] text-slate-500">
+                    Filter by building, shift, and date range.
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFilterBuilding("ALL");
+                    setFilterShift("ALL");
+                    setFilterDateFrom("");
+                    setFilterDateTo("");
+                  }}
+                  className="text-[11px] text-sky-300 hover:underline"
+                >
+                  Reset
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                <div>
+                  <label className="block text-[11px] text-slate-400 mb-1">
+                    Building
+                  </label>
+                  <select
+                    className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
+                    value={filterBuilding}
+                    onChange={(e) =>
+                      setFilterBuilding(e.target.value)
+                    }
+                  >
+                    <option value="ALL">All Buildings</option>
+                    {BUILDINGS.map((b) => (
+                      <option key={b} value={b}>
+                        {b}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[11px] text-slate-400 mb-1">
+                    Shift
+                  </label>
+                  <select
+                    className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
+                    value={filterShift}
+                    onChange={(e) => setFilterShift(e.target.value)}
+                  >
+                    <option value="ALL">All Shifts</option>
+                    {SHIFTS.map((s) => (
+                      <option key={s} value={s}>
+                        {s}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[11px] text-slate-400 mb-1">
+                    From (Date)
+                  </label>
+                  <input
+                    type="date"
+                    className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
+                    value={filterDateFrom}
+                    onChange={(e) =>
+                      setFilterDateFrom(e.target.value)
+                    }
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] text-slate-400 mb-1">
+                    To (Date)
+                  </label>
+                  <input
+                    type="date"
+                    className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
+                    value={filterDateTo}
+                    onChange={(e) => setFilterDateTo(e.target.value)}
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Table */}
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 text-xs">
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-slate-200 text-sm font-semibold">
+                  Staffing Plans
+                </div>
+                <div className="text-[11px] text-slate-500">
+                  Total:{" "}
+                  <span className="font-semibold">
+                    {plans.length}
+                  </span>{" "}
+                  · Showing:{" "}
+                  <span className="font-semibold">
+                    {filteredPlans.length}
+                  </span>
+                </div>
+              </div>
+
+              {filteredPlans.length === 0 ? (
+                <p className="text-sm text-slate-500">
+                  No staffing plans match the current filters.
+                </p>
+              ) : (
+                <div className="overflow-auto max-h-[520px]">
+                  <table className="min-w-full text-left border-collapse">
+                    <thead>
+                      <tr className="border-b border-slate-800 bg-slate-950/60">
+                        <th className="px-3 py-2 text-[11px] text-slate-400">
+                          Date
+                        </th>
+                        <th className="px-3 py-2 text-[11px] text-slate-400">
+                          Building
+                        </th>
+                        <th className="px-3 py-2 text-[11px] text-slate-400">
+                          Shift
+                        </th>
+                        <th className="px-3 py-2 text-[11px] text-slate-400 text-right">
+                          Required
+                        </th>
+                        <th className="px-3 py-2 text-[11px] text-slate-400 text-right">
+                          Actual (Active)
+                        </th>
+                        <th className="px-3 py-2 text-[11px] text-slate-400 text-right">
+                          Status
+                        </th>
+                        <th className="px-3 py-2 text-[11px] text-slate-400 text-right">
+                          Actions
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredPlans.map((p) => {
+                        const actual = actualByBuilding[p.building] ?? 0;
+                        const diff = actual - p.requiredTotal;
+                        let badgeLabel = "Balanced";
+                        let badgeClass =
+                          "bg-emerald-900/60 text-emerald-200 border border-emerald-700/70";
+
+                        if (diff < 0) {
+                          badgeLabel = "Understaffed";
+                          badgeClass =
+                            "bg-rose-900/60 text-rose-200 border border-rose-700/70";
+                        } else if (diff > 0) {
+                          badgeLabel = "Overstaffed";
+                          badgeClass =
+                            "bg-amber-900/60 text-amber-200 border border-amber-700/70";
+                        }
+
+                        return (
+                          <tr
+                            key={p.id}
+                            className="border-b border-slate-800/60 hover:bg-slate-900/60"
+                          >
+                            <td className="px-3 py-2 text-slate-300 font-mono">
+                              {p.date}
+                            </td>
+                            <td className="px-3 py-2 text-slate-300">
+                              {p.building}
+                            </td>
+                            <td className="px-3 py-2 text-slate-300">
+                              {p.shift}
+                            </td>
+                            <td className="px-3 py-2 text-right text-slate-200">
+                              {p.requiredTotal}
+                              <span className="text-[10px] text-slate-500 ml-1">
+                                (L {p.requiredLumpers} · E{" "}
+                                {p.requiredEquipment} · Lead{" "}
+                                {p.requiredLeads})
+                              </span>
+                            </td>
+                            <td className="px-3 py-2 text-right text-slate-200">
+                              {actual}
+                            </td>
+                            <td className="px-3 py-2 text-right">
+                              <span
+                                className={
+                                  "inline-flex rounded-full px-2 py-0.5 text-[10px] " +
+                                  badgeClass
+                                }
+                              >
+                                {badgeLabel}
+                              </span>
+                            </td>
+                            <td className="px-3 py-2 text-right">
+                              <div className="inline-flex gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => handleEdit(p)}
+                                  className="text-[11px] text-sky-300 hover:underline"
+                                >
+                                  Edit
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleDelete(p)}
+                                  className="text-[11px] text-rose-300 hover:underline"
+                                >
+                                  Delete
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
       </div>
+    </div>
+  );
+}
+
+function SummaryCard({
+  label,
+  value,
+  accent,
+}: {
+  label: string;
+  value: number;
+  accent?: "emerald" | "rose" | "amber" | "sky";
+}) {
+  const color =
+    accent === "emerald"
+      ? "text-emerald-300"
+      : accent === "rose"
+      ? "text-rose-300"
+      : accent === "amber"
+      ? "text-amber-300"
+      : accent === "sky"
+      ? "text-sky-300"
+      : "text-sky-300";
+
+  return (
+    <div className="rounded-2xl bg-slate-900 border border-slate-800 p-4">
+      <div className="text-xs text-slate-400 mb-1">{label}</div>
+      <div className={`text-2xl font-semibold ${color}`}>{value}</div>
     </div>
   );
 }

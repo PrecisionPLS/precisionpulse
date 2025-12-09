@@ -2,794 +2,792 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
+import { supabase } from "@/lib/supabaseClient";
+import { useCurrentUser } from "@/lib/useCurrentUser";
 
-const WORKFORCE_KEY = "precisionpulse_workforce";
-const TRAINING_KEY = "precisionpulse_training";
+const BUILDINGS = ["DC1", "DC5", "DC11", "DC14", "DC18"];
+const ROLES = [
+  "Lumper",
+  "Lead",
+  "Supervisor",
+  "Building Manager",
+  "Forklift Operator",
+  "Clamp Operator",
+  "Shuttler",
+  "Picker",
+  "Sanitation",
+  "Other",
+];
 
-const BUILDINGS = ["ALL", "DC1", "DC5", "DC11", "DC14", "DC18"];
+const STATUS_OPTIONS = [
+  "Assigned",
+  "In Progress",
+  "Completed",
+  "Overdue",
+] as const;
 
-type WorkforcePerson = {
+type TrainingStatus = (typeof STATUS_OPTIONS)[number];
+
+type TrainingRow = {
   id: string;
-  name: string;
-  role?: string;
-  building?: string;
-  status?: string;
+  created_at: string;
+  building: string | null;
+  role: string | null;
+  module_name: string | null;
+  required: boolean | null;
+  status: string | null;
+  due_date: string | null; // date
+  completed_at: string | null;
+  assignee_name: string | null;
+  notes: string | null;
 };
 
-type TrainingModule = {
+type TrainingRecord = {
   id: string;
-  name: string;
-  description?: string;
-  requiredRoles: string[]; // roles this module applies to
-  active: boolean;
-};
-
-type TrainingCompletion = {
-  id: string;
-  workerId: string;
-  moduleId: string;
-  completed: boolean;
+  createdAt: string;
+  building: string;
+  role: string;
+  moduleName: string;
+  required: boolean;
+  status: TrainingStatus;
+  dueDate?: string;
   completedAt?: string;
-  building?: string;
-  role?: string;
+  assigneeName?: string;
+  notes?: string;
 };
 
-type TrainingState = {
-  modules: TrainingModule[];
-  completions: TrainingCompletion[];
-};
-
-// Normalize workforce from whatever is stored
-function normalizeWorkforce(raw: any[]): WorkforcePerson[] {
-  if (!Array.isArray(raw)) return [];
-  return raw.map((w) => ({
-    id: String(w.id ?? w.workerId ?? w.email ?? w.name ?? ""),
-    name: String(
-      w.fullName ?? w.name ?? w.displayName ?? w.email ?? "Unknown"
-    ),
-    role: w.role ?? w.position ?? "",
-    building: w.building ?? w.assignedBuilding ?? "",
-    status: w.status ?? "",
-  }));
-}
-
-// Normalize training state in case shape changed
-function normalizeTraining(raw: any): TrainingState {
-  const modulesRaw: any[] = Array.isArray(raw?.modules) ? raw.modules : [];
-  const completionsRaw: any[] = Array.isArray(raw?.completions)
-    ? raw.completions
-    : [];
-
-  const modules: TrainingModule[] = modulesRaw.map((m) => ({
-    id: String(m.id ?? `${m.name ?? "module"}-${Date.now()}`),
-    name: String(m.name ?? "Untitled Module"),
-    description: m.description ?? "",
-    requiredRoles: Array.isArray(m.requiredRoles)
-      ? m.requiredRoles.map(String)
-      : [],
-    active:
-      typeof m.active === "boolean"
-        ? m.active
-        : m.status === "Active"
-        ? true
-        : true,
-  }));
-
-  const completions: TrainingCompletion[] = completionsRaw.map((c) => ({
-    id: String(
-      c.id ??
-        `${c.workerId ?? "worker"}-${c.moduleId ?? "module"}-${Date.now()}`
-    ),
-    workerId: String(c.workerId ?? ""),
-    moduleId: String(c.moduleId ?? ""),
-    completed: Boolean(c.completed ?? c.isComplete ?? false),
-    completedAt: c.completedAt ?? undefined,
-    building: c.building ?? "",
-    role: c.role ?? "",
-  }));
-
-  return { modules, completions };
+function rowToRecord(row: TrainingRow): TrainingRecord {
+  const statusRaw = (row.status ?? "Assigned") as TrainingStatus;
+  return {
+    id: String(row.id),
+    createdAt: row.created_at ?? new Date().toISOString(),
+    building: row.building ?? "DC18",
+    role: row.role ?? "Lumper",
+    moduleName: row.module_name ?? "",
+    required: row.required ?? true,
+    status:
+      STATUS_OPTIONS.includes(statusRaw) ? statusRaw : "Assigned",
+    dueDate: row.due_date ?? undefined,
+    completedAt: row.completed_at ?? undefined,
+    assigneeName: row.assignee_name ?? undefined,
+    notes: row.notes ?? undefined,
+  };
 }
 
 export default function TrainingPage() {
-  const [workforce, setWorkforce] = useState<WorkforcePerson[]>([]);
-  const [trainingState, setTrainingState] = useState<TrainingState>({
-    modules: [],
-    completions: [],
-  });
+  const currentUser = useCurrentUser();
+
+  const [records, setRecords] = useState<TrainingRecord[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
+
+  // Form state
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [building, setBuilding] = useState<string>("DC18");
+  const [role, setRole] = useState<string>("Lumper");
+  const [moduleName, setModuleName] = useState<string>("");
+  const [required, setRequired] = useState<boolean>(true);
+  const [status, setStatus] = useState<TrainingStatus>("Assigned");
+  const [dueDate, setDueDate] = useState<string>("");
+  const [assigneeName, setAssigneeName] = useState<string>("");
+  const [notes, setNotes] = useState<string>("");
 
   // Filters
-  const [buildingFilter, setBuildingFilter] = useState<string>("ALL");
-  const [roleFilter, setRoleFilter] = useState<string>("ALL");
+  const [filterBuilding, setFilterBuilding] = useState<string>("ALL");
+  const [filterRole, setFilterRole] = useState<string>("ALL");
+  const [filterStatus, setFilterStatus] =
+    useState<TrainingStatus | "ALL">("ALL");
+  const [search, setSearch] = useState<string>("");
 
-  // Module form
-  const [moduleName, setModuleName] = useState("");
-  const [moduleDescription, setModuleDescription] = useState("");
-  const [moduleRolesText, setModuleRolesText] = useState("");
-  const [moduleError, setModuleError] = useState<string | null>(null);
+  function resetForm() {
+    setEditingId(null);
+    setBuilding("DC18");
+    setRole("Lumper");
+    setModuleName("");
+    setRequired(true);
+    setStatus("Assigned");
+    setDueDate("");
+    setAssigneeName("");
+    setNotes("");
+  }
 
-  // UI state
-  const [selectedModuleId, setSelectedModuleId] = useState<string | "ALL">(
-    "ALL"
-  );
+  async function loadTraining() {
+    if (!currentUser) return;
+
+    setLoading(true);
+    setError(null);
+    setInfo(null);
+
+    try {
+      const { data, error } = await supabase
+        .from("training_records")
+        .select("*")
+        .order("created_at", { ascending: false });
+
+      if (error) {
+        console.error("Error loading training records", error);
+        setError("Failed to load training data from server.");
+        return;
+      }
+
+      const rows = (data || []) as TrainingRow[];
+      const mapped = rows.map(rowToRecord);
+      setRecords(mapped);
+    } catch (e) {
+      console.error("Unexpected error loading training", e);
+      setError("Unexpected error loading training data.");
+    } finally {
+      setLoading(false);
+    }
+  }
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
+    if (!currentUser) return;
+    loadTraining();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentUser]);
 
-    // Load workforce
-    try {
-      const raw = window.localStorage.getItem(WORKFORCE_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        setWorkforce(normalizeWorkforce(parsed));
-      }
-    } catch (e) {
-      console.error("Failed to load workforce for training", e);
-    }
-
-    // Load training state
-    try {
-      const raw = window.localStorage.getItem(TRAINING_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        setTrainingState(normalizeTraining(parsed));
-      }
-    } catch (e) {
-      console.error("Failed to load training state", e);
-    }
-  }, []);
-
-  function saveTrainingState(next: TrainingState) {
-    setTrainingState(next);
-    if (typeof window !== "undefined") {
-      window.localStorage.setItem(TRAINING_KEY, JSON.stringify(next));
-    }
-  }
-
-  // Derived data
-  const allRoles = useMemo(() => {
-    const set = new Set<string>();
-    for (const w of workforce) {
-      if (w.role) set.add(w.role);
-    }
-    return Array.from(set).sort();
-  }, [workforce]);
-
-  const filteredWorkforce = useMemo(() => {
-    return workforce.filter((w) => {
-      if (buildingFilter !== "ALL" && w.building !== buildingFilter) {
-        return false;
-      }
-      if (roleFilter !== "ALL" && (w.role ?? "") !== roleFilter) {
-        return false;
-      }
-      return true;
-    });
-  }, [workforce, buildingFilter, roleFilter]);
-
-  // Modules list (active first)
-  const activeModules = trainingState.modules.filter((m) => m.active);
-  const allModules = trainingState.modules;
-
-  // Compliance calculations
-  function getRequiredModulesForWorker(w: WorkforcePerson): TrainingModule[] {
-    // Rule: module applies to a worker if:
-    // - module.active
-    // - AND either requiredRoles is empty (global) OR it includes worker.role
-    return activeModules.filter((m) => {
-      if (!m.requiredRoles || m.requiredRoles.length === 0) return true;
-      if (!w.role) return false;
-      return m.requiredRoles.includes(w.role);
-    });
-  }
-
-  function isModuleCompleted(
-    workerId: string,
-    moduleId: string
-  ): TrainingCompletion | null {
-    return (
-      trainingState.completions.find(
-        (c) => c.workerId === workerId && c.moduleId === moduleId
-      ) ?? null
-    );
-  }
-
-  type WorkerComplianceRow = {
-    worker: WorkforcePerson;
-    requiredCount: number;
-    completedCount: number;
-    percent: number;
-    status: "Compliant" | "Partial" | "Not Started" | "No Required";
-  };
-
-  const workerComplianceRows: WorkerComplianceRow[] = useMemo(() => {
-    const rows: WorkerComplianceRow[] = [];
-
-    for (const w of filteredWorkforce) {
-      const required = getRequiredModulesForWorker(w);
-      const requiredCount = required.length;
-
-      if (requiredCount === 0) {
-        rows.push({
-          worker: w,
-          requiredCount: 0,
-          completedCount: 0,
-          percent: 100,
-          status: "No Required",
-        });
-        continue;
-      }
-
-      let completedCount = 0;
-      for (const m of required) {
-        const comp = isModuleCompleted(w.id, m.id);
-        if (comp && comp.completed) completedCount += 1;
-      }
-
-      const percent =
-        requiredCount === 0
-          ? 100
-          : Math.round((completedCount / requiredCount) * 100);
-
-      let status: WorkerComplianceRow["status"];
-      if (completedCount === 0) status = "Not Started";
-      else if (completedCount === requiredCount) status = "Compliant";
-      else status = "Partial";
-
-      rows.push({
-        worker: w,
-        requiredCount,
-        completedCount,
-        percent,
-        status,
-      });
-    }
-
-    // Sort: Non-compliant first, then compliant, then no required
-    rows.sort((a, b) => {
-      const statusOrder = (s: WorkerComplianceRow["status"]) => {
-        if (s === "Compliant") return 2;
-        if (s === "No Required") return 3;
-        if (s === "Partial") return 1;
-        return 0; // Not Started
-      };
-      const diff = statusOrder(a.status) - statusOrder(b.status);
-      if (diff !== 0) return diff;
-
-      // Within same status, sort by worker name
-      return a.worker.name.localeCompare(b.worker.name);
-    });
-
-    return rows;
-  }, [filteredWorkforce, activeModules, trainingState.completions]);
-
-  const complianceSummary = useMemo(() => {
-    const withRequirements = workerComplianceRows.filter(
-      (r) => r.requiredCount > 0
-    );
-    const compliant = withRequirements.filter(
-      (r) => r.status === "Compliant"
-    );
-    const partialOrNot = withRequirements.filter(
-      (r) => r.status === "Partial" || r.status === "Not Started"
-    );
-
-    const totalWorkers = filteredWorkforce.length;
-    const totalWithReq = withRequirements.length;
-    const percentCompliant =
-      totalWithReq === 0
-        ? 100
-        : Math.round((compliant.length / totalWithReq) * 100);
-
-    return {
-      totalWorkers,
-      totalWithReq,
-      compliantCount: compliant.length,
-      nonCompliantCount: partialOrNot.length,
-      percentCompliant,
-    };
-  }, [workerComplianceRows, filteredWorkforce.length]);
-
-  function handleAddModule(e: React.FormEvent) {
+  async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    setModuleError(null);
+    setError(null);
+    setInfo(null);
 
     if (!moduleName.trim()) {
-      setModuleError("Module name is required.");
+      setError("Module name is required.");
       return;
     }
 
-    const roles = moduleRolesText
-      .split(",")
-      .map((r) => r.trim())
-      .filter(Boolean);
+    try {
+      if (editingId) {
+        // UPDATE
+        const { error } = await supabase
+          .from("training_records")
+          .update({
+            building,
+            role,
+            module_name: moduleName.trim(),
+            required,
+            status,
+            due_date: dueDate || null,
+            completed_at:
+              status === "Completed"
+                ? new Date().toISOString()
+                : null,
+            assignee_name: assigneeName.trim() || null,
+            notes: notes.trim() || null,
+          })
+          .eq("id", editingId);
 
-    const newModule: TrainingModule = {
-      id: `${Date.now()}`,
-      name: moduleName.trim(),
-      description: moduleDescription.trim(),
-      requiredRoles: roles,
-      active: true,
-    };
+        if (error) {
+          console.error("Error updating training record", error);
+          setError("Failed to update training record.");
+          return;
+        }
 
-    const next: TrainingState = {
-      ...trainingState,
-      modules: [newModule, ...trainingState.modules],
-    };
-    saveTrainingState(next);
+        setInfo("Training record updated.");
+      } else {
+        // INSERT
+        const { error } = await supabase.from("training_records").insert({
+          building,
+          role,
+          module_name: moduleName.trim(),
+          required,
+          status,
+          due_date: dueDate || null,
+          completed_at:
+            status === "Completed"
+              ? new Date().toISOString()
+              : null,
+          assignee_name: assigneeName.trim() || null,
+          notes: notes.trim() || null,
+        });
 
-    setModuleName("");
-    setModuleDescription("");
-    setModuleRolesText("");
+        if (error) {
+          console.error("Error inserting training record", error);
+          setError("Failed to create training record.");
+          return;
+        }
+
+        setInfo("Training record created.");
+      }
+
+      resetForm();
+      await loadTraining();
+    } catch (e) {
+      console.error("Unexpected error saving training record", e);
+      setError("Unexpected error saving training record.");
+    }
   }
 
-  function handleToggleModuleActive(moduleId: string) {
-    const nextModules = trainingState.modules.map((m) =>
-      m.id === moduleId ? { ...m, active: !m.active } : m
-    );
-    saveTrainingState({
-      ...trainingState,
-      modules: nextModules,
-    });
-  }
-
-  function handleDeleteModule(moduleId: string) {
+  async function handleDelete(id: string) {
     if (typeof window !== "undefined") {
       const ok = window.confirm(
-        "Delete this module and all its completion records?"
+        "Delete this training record? This cannot be undone."
       );
       if (!ok) return;
     }
 
-    const nextModules = trainingState.modules.filter(
-      (m) => m.id !== moduleId
-    );
-    const nextCompletions = trainingState.completions.filter(
-      (c) => c.moduleId !== moduleId
-    );
+    try {
+      const { error } = await supabase
+        .from("training_records")
+        .delete()
+        .eq("id", id);
 
-    saveTrainingState({
-      modules: nextModules,
-      completions: nextCompletions,
-    });
+      if (error) {
+        console.error("Error deleting training record", error);
+        setError("Failed to delete training record.");
+        return;
+      }
 
-    if (selectedModuleId === moduleId) {
-      setSelectedModuleId("ALL");
+      setInfo("Training record deleted.");
+      if (editingId === id) resetForm();
+      await loadTraining();
+    } catch (e) {
+      console.error("Unexpected error deleting training record", e);
+      setError("Unexpected error deleting training record.");
     }
   }
 
-  function handleToggleCompletion(worker: WorkforcePerson, module: TrainingModule) {
-    const existingIndex = trainingState.completions.findIndex(
-      (c) => c.workerId === worker.id && c.moduleId === module.id
-    );
-
-    let nextCompletions = [...trainingState.completions];
-
-    if (existingIndex === -1) {
-      const now = new Date().toISOString();
-      const newCompletion: TrainingCompletion = {
-        id: `${worker.id}-${module.id}-${Date.now()}`,
-        workerId: worker.id,
-        moduleId: module.id,
-        completed: true,
-        completedAt: now,
-        building: worker.building,
-        role: worker.role,
-      };
-      nextCompletions.push(newCompletion);
-    } else {
-      const existing = nextCompletions[existingIndex];
-      const nowCompleted = !existing.completed;
-      nextCompletions[existingIndex] = {
-        ...existing,
-        completed: nowCompleted,
-        completedAt: nowCompleted
-          ? new Date().toISOString()
-          : undefined,
-      };
-    }
-
-    saveTrainingState({
-      ...trainingState,
-      completions: nextCompletions,
-    });
+  function handleEdit(rec: TrainingRecord) {
+    setEditingId(rec.id);
+    setBuilding(rec.building);
+    setRole(rec.role);
+    setModuleName(rec.moduleName);
+    setRequired(rec.required);
+    setStatus(rec.status);
+    setDueDate(rec.dueDate ?? "");
+    setAssigneeName(rec.assigneeName ?? "");
+    setNotes(rec.notes ?? "");
   }
 
-  const displayModules =
-    selectedModuleId === "ALL"
-      ? activeModules
-      : activeModules.filter((m) => m.id === selectedModuleId);
+  const filteredRecords = useMemo(() => {
+    let rows = [...records];
+
+    if (filterBuilding !== "ALL") {
+      rows = rows.filter((r) => r.building === filterBuilding);
+    }
+    if (filterRole !== "ALL") {
+      rows = rows.filter((r) => r.role === filterRole);
+    }
+    if (filterStatus !== "ALL") {
+      rows = rows.filter((r) => r.status === filterStatus);
+    }
+    if (search.trim()) {
+      const q = search.trim().toLowerCase();
+      rows = rows.filter(
+        (r) =>
+          r.moduleName.toLowerCase().includes(q) ||
+          (r.assigneeName || "").toLowerCase().includes(q) ||
+          r.role.toLowerCase().includes(q)
+      );
+    }
+
+    return rows;
+  }, [records, filterBuilding, filterRole, filterStatus, search]);
+
+  const summary = useMemo(() => {
+    const total = records.length;
+    const completed = records.filter(
+      (r) => r.status === "Completed"
+    ).length;
+    const inProgress = records.filter(
+      (r) => r.status === "In Progress"
+    ).length;
+    const overdue = records.filter(
+      (r) => r.status === "Overdue"
+    ).length;
+    const requiredTotal = records.filter((r) => r.required).length;
+
+    return { total, completed, inProgress, overdue, requiredTotal };
+  }, [records]);
+
+  // Route protection AFTER hooks
+  if (!currentUser) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-400 flex flex-col items-center justify-center text-sm gap-2">
+        <div>Redirecting to login…</div>
+        <a
+          href="/auth"
+          className="text-sky-400 text-xs underline hover:text-sky-300"
+        >
+          Click here if you are not redirected.
+        </a>
+      </div>
+    );
+  }
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-semibold text-slate-50">
-            Training & Compliance
-          </h1>
-          <p className="text-sm text-slate-400">
-            Define training modules, tie them to roles, and track worker
-            completion by building and role.
-          </p>
-        </div>
-        <Link
-          href="/"
-          className="text-xs px-3 py-1 rounded-full border border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800"
-        >
-          ← Back to Dashboard
-        </Link>
-      </div>
-
-      {/* Top section: Modules + Summary */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Modules card */}
-        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-3 text-xs">
-          <div className="flex items-center justify-between">
-            <div>
-              <div className="text-slate-200 text-sm font-semibold">
-                Training Modules
-              </div>
-              <div className="text-[11px] text-slate-500">
-                Create modules and assign them to roles.
-              </div>
-            </div>
-          </div>
-
-          {moduleError && (
-            <div className="text-[11px] text-red-300 bg-red-950/40 border border-red-800 rounded px-3 py-2">
-              {moduleError}
-            </div>
-          )}
-
-          <form onSubmit={handleAddModule} className="space-y-2">
-            <div>
-              <label className="block text-[11px] text-slate-400 mb-1">
-                Module name
-              </label>
-              <input
-                className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
-                placeholder="e.g. Dock Safety, Zero Tolerance, PIT Certification"
-                value={moduleName}
-                onChange={(e) => setModuleName(e.target.value)}
-              />
-            </div>
-            <div>
-              <label className="block text-[11px] text-slate-400 mb-1">
-                Description (optional)
-              </label>
-              <textarea
-                className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50 min-h-[40px]"
-                placeholder="What this module covers or any notes for leads/HR."
-                value={moduleDescription}
-                onChange={(e) => setModuleDescription(e.target.value)}
-              />
-            </div>
-            <div>
-              <label className="block text-[11px] text-slate-400 mb-1">
-                Required roles (comma separated)
-              </label>
-              <input
-                className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
-                placeholder="e.g. Lumper, Lead, Forklift"
-                value={moduleRolesText}
-                onChange={(e) => setModuleRolesText(e.target.value)}
-              />
-              <p className="text-[11px] text-slate-500 mt-1">
-                Leave blank to apply this module to <strong>all roles</strong>.
-              </p>
-            </div>
-            <button
-              type="submit"
-              className="mt-2 rounded-lg bg-sky-600 hover:bg-sky-500 text-[11px] font-medium text-white px-3 py-1.5"
-            >
-              + Add Module
-            </button>
-          </form>
-
-          <div className="mt-3 border-t border-slate-800 pt-3 space-y-2">
-            <div className="flex items-center justify-between">
-              <div className="text-[11px] text-slate-400">
-                Existing Modules
-              </div>
-              <select
-                className="rounded bg-slate-950 border border-slate-700 px-2 py-1 text-[11px] text-slate-50"
-                value={selectedModuleId}
-                onChange={(e) => setSelectedModuleId(e.target.value as any)}
-              >
-                <option value="ALL">Show all active</option>
-                {trainingState.modules.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            {allModules.length === 0 ? (
-              <p className="text-[11px] text-slate-500">
-                No modules defined yet. Create your first Dock Safety /
-                Zero Tolerance module above.
-              </p>
-            ) : (
-              <div className="space-y-2 max-h-52 overflow-auto pr-1">
-                {allModules.map((m) => (
-                  <div
-                    key={m.id}
-                    className="border border-slate-800 rounded-lg bg-slate-950 px-2 py-2 space-y-1"
-                  >
-                    <div className="flex items-center justify-between">
-                      <div className="text-[11px] text-slate-100 font-medium">
-                        {m.name}
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => handleToggleModuleActive(m.id)}
-                          className={`text-[10px] px-2 py-0.5 rounded-full border ${
-                            m.active
-                              ? "bg-emerald-900/40 border-emerald-700 text-emerald-200"
-                              : "bg-slate-900/60 border-slate-700 text-slate-300"
-                          }`}
-                        >
-                          {m.active ? "Active" : "Inactive"}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleDeleteModule(m.id)}
-                          className="text-[10px] px-2 py-0.5 rounded-full border border-red-700 bg-red-950 text-red-200 hover:bg-red-900"
-                        >
-                          Delete
-                        </button>
-                      </div>
-                    </div>
-                    {m.description && (
-                      <div className="text-[11px] text-slate-400">
-                        {m.description}
-                      </div>
-                    )}
-                    <div className="text-[11px] text-slate-500">
-                      Roles:{" "}
-                      {m.requiredRoles.length === 0
-                        ? "All roles"
-                        : m.requiredRoles.join(", ")}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Compliance summary */}
-        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-3 text-xs">
-          <div className="flex items-center justify-between">
-            <div>
-              <div className="text-slate-200 text-sm font-semibold">
-                Compliance Summary
-              </div>
-              <div className="text-[11px] text-slate-500">
-                Based on Workforce & active modules.
-              </div>
-            </div>
-            <div className="text-[11px] text-slate-500 text-right">
-              Workers in view:{" "}
-              <span className="text-slate-200">
-                {complianceSummary.totalWorkers}
-              </span>
-              <br />
-              With requirements:{" "}
-              <span className="text-slate-200">
-                {complianceSummary.totalWithReq}
-              </span>
-            </div>
-          </div>
-
-          <div className="rounded-xl bg-slate-950 border border-slate-800 p-3">
-            <div className="text-[11px] text-slate-400 mb-1">
-              Fully Compliant (all required modules)
-            </div>
-            <div className="flex items-baseline gap-2">
-              <div className="text-2xl font-semibold text-emerald-300">
-                {complianceSummary.percentCompliant}%
-              </div>
-              <div className="text-[11px] text-slate-500">
-                {complianceSummary.compliantCount} of{" "}
-                {complianceSummary.totalWithReq} workers with requirements
-              </div>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <div className="rounded-xl bg-slate-950 border border-slate-800 p-3">
-              <div className="text-[11px] text-slate-400 mb-1">
-                Non-compliant (partial / not started)
-              </div>
-              <div className="text-lg font-semibold text-amber-300">
-                {complianceSummary.nonCompliantCount}
-              </div>
-            </div>
-            <div className="rounded-xl bg-slate-950 border border-slate-800 p-3">
-              <div className="text-[11px] text-slate-400 mb-1">
-                Modules (active)
-              </div>
-              <div className="text-lg font-semibold text-slate-100">
-                {activeModules.length}
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Filters for workers */}
-        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-3 text-xs">
-          <div className="text-slate-200 text-sm font-semibold">
-            Filter Workforce
-          </div>
+    <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-950 to-slate-900 text-slate-50">
+      <div className="mx-auto max-w-7xl p-6 space-y-6">
+        {/* Header */}
+        <div className="flex items-center justify-between gap-4">
           <div>
-            <label className="block text-[11px] text-slate-400 mb-1">
-              Building
-            </label>
-            <select
-              className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
-              value={buildingFilter}
-              onChange={(e) => setBuildingFilter(e.target.value)}
-            >
-              {BUILDINGS.map((b) => (
-                <option key={b} value={b}>
-                  {b === "ALL" ? "All Buildings" : b}
-                </option>
-              ))}
-            </select>
+            <h1 className="text-2xl font-semibold text-slate-50">
+              Training & Compliance
+            </h1>
+            <p className="text-sm text-slate-400">
+              Track training modules, required compliance, and completion
+              by building and role.
+            </p>
           </div>
-          <div>
-            <label className="block text-[11px] text-slate-400 mb-1">
-              Role
-            </label>
-            <select
-              className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
-              value={roleFilter}
-              onChange={(e) => setRoleFilter(e.target.value)}
-            >
-              <option value="ALL">All Roles</option>
-              {allRoles.map((r) => (
-                <option key={r} value={r}>
-                  {r}
-                </option>
-              ))}
-            </select>
-          </div>
-          <p className="text-[11px] text-slate-500">
-            Workforce list is pulled from the Workforce module. Make sure
-            workers have roles and buildings assigned for best results.
-          </p>
-        </div>
-      </div>
-
-      {/* Worker x Module matrix */}
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 text-xs space-y-3">
-        <div className="flex items-center justify-between">
-          <div>
-            <div className="text-slate-200 text-sm font-semibold">
-              Worker Training Matrix
-            </div>
-            <div className="text-[11px] text-slate-500">
-              Click the checkboxes to mark modules complete per worker.
-            </div>
-          </div>
+          <Link
+            href="/"
+            className="text-xs px-3 py-1 rounded-full border border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800"
+          >
+            ← Back to Dashboard
+          </Link>
         </div>
 
-        {filteredWorkforce.length === 0 ? (
-          <p className="text-sm text-slate-500">
-            No workers match the current filters. Check your Workforce
-            data for buildings and roles.
-          </p>
-        ) : activeModules.length === 0 ? (
-          <p className="text-sm text-slate-500">
-            No active modules. Activate or create training modules to
-            track compliance.
-          </p>
-        ) : (
-          <div className="overflow-auto max-h-[520px]">
-            <table className="min-w-full text-left border-collapse">
-              <thead>
-                <tr className="border-b border-slate-800 bg-slate-950/60">
-                  <th className="px-3 py-2 text-[11px] text-slate-400">
-                    Worker
-                  </th>
-                  <th className="px-3 py-2 text-[11px] text-slate-400">
-                    Role
-                  </th>
-                  <th className="px-3 py-2 text-[11px] text-slate-400">
-                    Building
-                  </th>
-                  <th className="px-3 py-2 text-[11px] text-slate-400 text-right">
-                    Required / Completed
-                  </th>
-                  <th className="px-3 py-2 text-[11px] text-slate-400 text-right">
-                    %
-                  </th>
-                  {displayModules.map((m) => (
-                    <th
-                      key={m.id}
-                      className="px-3 py-2 text-[11px] text-slate-400 text-center"
-                    >
-                      {m.name}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {workerComplianceRows.map((row) => {
-                  const w = row.worker;
-                  return (
-                    <tr
-                      key={w.id}
-                      className="border-b border-slate-800/60 hover:bg-slate-900/60"
-                    >
-                      <td className="px-3 py-2 text-slate-100">
-                        {w.name}
-                      </td>
-                      <td className="px-3 py-2 text-slate-300">
-                        {w.role || "—"}
-                      </td>
-                      <td className="px-3 py-2 text-slate-300">
-                        {w.building || "—"}
-                      </td>
-                      <td className="px-3 py-2 text-right text-slate-200">
-                        {row.requiredCount} / {row.completedCount}
-                      </td>
-                      <td className="px-3 py-2 text-right">
-                        <span
-                          className={
-                            row.status === "Compliant"
-                              ? "text-emerald-300"
-                              : row.status === "Partial"
-                              ? "text-amber-300"
-                              : row.status === "Not Started"
-                              ? "text-rose-300"
-                              : "text-slate-300"
-                          }
-                        >
-                          {row.percent}%
-                        </span>
-                      </td>
-                      {displayModules.map((m) => {
-                        const requiredForThisWorker =
-                          getRequiredModulesForWorker(w).some(
-                            (rm) => rm.id === m.id
-                          );
-                        const comp = isModuleCompleted(w.id, m.id);
-                        const checked = comp?.completed ?? false;
-                        return (
-                          <td
-                            key={m.id}
-                            className="px-3 py-2 text-center"
-                          >
-                            {requiredForThisWorker ? (
-                              <input
-                                type="checkbox"
-                                checked={checked}
-                                onChange={() =>
-                                  handleToggleCompletion(w, m)
-                                }
-                                className="h-3 w-3 rounded border-slate-500 bg-slate-950"
-                              />
-                            ) : (
-                              <span className="text-[10px] text-slate-700">
-                                —
-                              </span>
-                            )}
-                          </td>
-                        );
-                      })}
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+        {/* Summary row */}
+        <div className="grid grid-cols-1 md:grid-cols-5 gap-4 text-xs">
+          <SummaryCard
+            label="Total Records"
+            value={summary.total}
+            color="text-sky-300"
+          />
+          <SummaryCard
+            label="Required Modules"
+            value={summary.requiredTotal}
+            color="text-slate-100"
+          />
+          <SummaryCard
+            label="Completed"
+            value={summary.completed}
+            color="text-emerald-300"
+          />
+          <SummaryCard
+            label="In Progress"
+            value={summary.inProgress}
+            color="text-amber-300"
+          />
+          <SummaryCard
+            label="Overdue"
+            value={summary.overdue}
+            color="text-rose-300"
+          />
+        </div>
+
+        {/* Error/info */}
+        {error && (
+          <div className="text-xs text-red-300 bg-red-950/40 border border-red-800 rounded px-3 py-2">
+            {error}
           </div>
         )}
+        {info && (
+          <div className="text-xs text-emerald-300 bg-emerald-950/40 border border-emerald-800 rounded px-3 py-2">
+            {info}
+          </div>
+        )}
+        {loading && (
+          <div className="text-xs text-slate-400">
+            Loading training records…
+          </div>
+        )}
+
+        {/* Form + list */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          {/* Form */}
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 text-xs space-y-3">
+            <div className="flex items-center justify-between mb-1">
+              <div className="text-slate-200 text-sm font-semibold">
+                {editingId ? "Edit Training Record" : "Add Training Record"}
+              </div>
+              {editingId && (
+                <button
+                  type="button"
+                  onClick={resetForm}
+                  className="text-[11px] text-sky-300 hover:underline"
+                >
+                  Clear / New
+                </button>
+              )}
+            </div>
+
+            <form onSubmit={handleSubmit} className="space-y-3">
+              <div>
+                <label className="block text-[11px] text-slate-400 mb-1">
+                  Module Name
+                </label>
+                <input
+                  className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
+                  placeholder="Example: Safety - Powered Industrial Truck"
+                  value={moduleName}
+                  onChange={(e) => setModuleName(e.target.value)}
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-[11px] text-slate-400 mb-1">
+                    Building
+                  </label>
+                  <select
+                    className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
+                    value={building}
+                    onChange={(e) => setBuilding(e.target.value)}
+                  >
+                    {BUILDINGS.map((b) => (
+                      <option key={b} value={b}>
+                        {b}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[11px] text-slate-400 mb-1">
+                    Role / Audience
+                  </label>
+                  <select
+                    className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
+                    value={role}
+                    onChange={(e) => setRole(e.target.value)}
+                  >
+                    {ROLES.map((r) => (
+                      <option key={r} value={r}>
+                        {r}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-[11px] text-slate-400 mb-1">
+                    Status
+                  </label>
+                  <select
+                    className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
+                    value={status}
+                    onChange={(e) =>
+                      setStatus(e.target.value as TrainingStatus)
+                    }
+                  >
+                    {STATUS_OPTIONS.map((s) => (
+                      <option key={s} value={s}>
+                        {s}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="flex items-end gap-2">
+                  <label className="flex items-center gap-2 text-[11px] text-slate-400 mb-1">
+                    <input
+                      type="checkbox"
+                      className="rounded border-slate-600 bg-slate-950"
+                      checked={required}
+                      onChange={(e) => setRequired(e.target.checked)}
+                    />
+                    Required module
+                  </label>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[11px] text-slate-400 mb-1">
+                  Due Date (optional)
+                </label>
+                <input
+                  type="date"
+                  className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
+                  value={dueDate}
+                  onChange={(e) => setDueDate(e.target.value)}
+                />
+              </div>
+
+              <div>
+                <label className="block text-[11px] text-slate-400 mb-1">
+                  Assignee Name (optional)
+                </label>
+                <input
+                  className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
+                  placeholder="Lumper name / lead / manager..."
+                  value={assigneeName}
+                  onChange={(e) => setAssigneeName(e.target.value)}
+                />
+              </div>
+
+              <div>
+                <label className="block text-[11px] text-slate-400 mb-1">
+                  Notes (optional)
+                </label>
+                <textarea
+                  rows={3}
+                  className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50 resize-none"
+                  placeholder="Compliance details, renewal cadence, etc."
+                  value={notes}
+                  onChange={(e) => setNotes(e.target.value)}
+                />
+              </div>
+
+              <button
+                type="submit"
+                className="mt-1 w-full rounded-lg bg-sky-600 hover:bg-sky-500 text-[11px] font-medium text-white px-4 py-2"
+              >
+                {editingId ? "Save Changes" : "Add Training Record"}
+              </button>
+            </form>
+          </div>
+
+          {/* Filters + list */}
+          <div className="lg:col-span-2 space-y-4">
+            {/* Filters */}
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 text-xs">
+              <div className="flex items-center justify-between mb-3">
+                <div>
+                  <div className="text-slate-200 text-sm font-semibold">
+                    Filters
+                  </div>
+                  <div className="text-[11px] text-slate-500">
+                    Filter by building, role, status, or search text.
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFilterBuilding("ALL");
+                    setFilterRole("ALL");
+                    setFilterStatus("ALL");
+                    setSearch("");
+                  }}
+                  className="text-[11px] text-sky-300 hover:underline"
+                >
+                  Reset
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                <div>
+                  <label className="block text-[11px] text-slate-400 mb-1">
+                    Building
+                  </label>
+                  <select
+                    className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
+                    value={filterBuilding}
+                    onChange={(e) => setFilterBuilding(e.target.value)}
+                  >
+                    <option value="ALL">All Buildings</option>
+                    {BUILDINGS.map((b) => (
+                      <option key={b} value={b}>
+                        {b}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[11px] text-slate-400 mb-1">
+                    Role
+                  </label>
+                  <select
+                    className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
+                    value={filterRole}
+                    onChange={(e) => setFilterRole(e.target.value)}
+                  >
+                    <option value="ALL">All Roles</option>
+                    {ROLES.map((r) => (
+                      <option key={r} value={r}>
+                        {r}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[11px] text-slate-400 mb-1">
+                    Status
+                  </label>
+                  <select
+                    className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
+                    value={filterStatus}
+                    onChange={(e) =>
+                      setFilterStatus(
+                        e.target.value as TrainingStatus | "ALL"
+                      )
+                    }
+                  >
+                    <option value="ALL">All Status</option>
+                    {STATUS_OPTIONS.map((s) => (
+                      <option key={s} value={s}>
+                        {s}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[11px] text-slate-400 mb-1">
+                    Search
+                  </label>
+                  <input
+                    className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
+                    placeholder="Module, assignee, role..."
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* List */}
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 text-xs">
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-slate-200 text-sm font-semibold">
+                  Training Records
+                </div>
+                <div className="text-[11px] text-slate-500">
+                  Total:{" "}
+                  <span className="font-semibold text-slate-200">
+                    {records.length}
+                  </span>{" "}
+                  · Showing:{" "}
+                  <span className="font-semibold text-slate-200">
+                    {filteredRecords.length}
+                  </span>
+                </div>
+              </div>
+
+              {filteredRecords.length === 0 ? (
+                <p className="text-sm text-slate-500">
+                  No training records match the current filters.
+                </p>
+              ) : (
+                <div className="overflow-auto max-h-[520px]">
+                  <table className="min-w-full text-left border-collapse">
+                    <thead>
+                      <tr className="border-b border-slate-800 bg-slate-950/60">
+                        <th className="px-3 py-2 text-[11px] text-slate-400">
+                          Module
+                        </th>
+                        <th className="px-3 py-2 text-[11px] text-slate-400">
+                          Building / Role
+                        </th>
+                        <th className="px-3 py-2 text-[11px] text-slate-400">
+                          Assignee
+                        </th>
+                        <th className="px-3 py-2 text-[11px] text-slate-400">
+                          Due / Completed
+                        </th>
+                        <th className="px-3 py-2 text-[11px] text-slate-400">
+                          Required
+                        </th>
+                        <th className="px-3 py-2 text-[11px] text-slate-400">
+                          Status
+                        </th>
+                        <th className="px-3 py-2 text-[11px] text-slate-400 text-right">
+                          Actions
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredRecords.map((r) => {
+                        let badgeClass =
+                          "bg-slate-900/80 text-slate-200 border border-slate-600/70";
+                        if (r.status === "Completed") {
+                          badgeClass =
+                            "bg-emerald-900/60 text-emerald-200 border border-emerald-700/70";
+                        } else if (r.status === "In Progress") {
+                          badgeClass =
+                            "bg-sky-900/60 text-sky-200 border border-sky-700/70";
+                        } else if (r.status === "Overdue") {
+                          badgeClass =
+                            "bg-rose-900/60 text-rose-200 border border-rose-700/70";
+                        }
+
+                        return (
+                          <tr
+                            key={r.id}
+                            className="border-b border-slate-800/60 hover:bg-slate-900/60"
+                          >
+                            <td className="px-3 py-2 text-slate-100">
+                              <div className="text-xs font-medium">
+                                {r.moduleName}
+                              </div>
+                              {r.notes && (
+                                <div className="text-[11px] text-slate-500 line-clamp-1">
+                                  {r.notes}
+                                </div>
+                              )}
+                            </td>
+                            <td className="px-3 py-2 text-slate-300">
+                              {r.building} • {r.role}
+                            </td>
+                            <td className="px-3 py-2 text-slate-300">
+                              {r.assigneeName || "—"}
+                            </td>
+                            <td className="px-3 py-2 text-slate-300">
+                              <div className="text-[11px] text-slate-400">
+                                Due:{" "}
+                                <span className="text-slate-100">
+                                  {r.dueDate || "—"}
+                                </span>
+                              </div>
+                              <div className="text-[11px] text-slate-400">
+                                Done:{" "}
+                                <span className="text-slate-100">
+                                  {r.completedAt
+                                    ? r.completedAt.slice(0, 10)
+                                    : "—"}
+                                </span>
+                              </div>
+                            </td>
+                            <td className="px-3 py-2 text-slate-300">
+                              {r.required ? "Yes" : "No"}
+                            </td>
+                            <td className="px-3 py-2">
+                              <span
+                                className={
+                                  "inline-flex rounded-full px-2 py-0.5 text-[10px] " +
+                                  badgeClass
+                                }
+                              >
+                                {r.status}
+                              </span>
+                            </td>
+                            <td className="px-3 py-2 text-right">
+                              <div className="inline-flex gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => handleEdit(r)}
+                                  className="text-[11px] text-sky-300 hover:underline"
+                                >
+                                  Edit
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleDelete(r.id)}
+                                  className="text-[11px] text-rose-300 hover:underline"
+                                >
+                                  Delete
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
       </div>
+    </div>
+  );
+}
+
+function SummaryCard({
+  label,
+  value,
+  color,
+}: {
+  label: string;
+  value: number;
+  color: string;
+}) {
+  return (
+    <div className="rounded-2xl bg-slate-900 border border-slate-800 p-4">
+      <div className="text-xs text-slate-400 mb-1">{label}</div>
+      <div className={`text-2xl font-semibold ${color}`}>{value}</div>
     </div>
   );
 }

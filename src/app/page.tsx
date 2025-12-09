@@ -1,30 +1,87 @@
 "use client";
 
-import { supabase } from "@/lib/supabaseClient";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import { supabase } from "@/lib/supabaseClient";
 import { useCurrentUser } from "@/lib/useCurrentUser";
-
-const WORKFORCE_KEY = "precisionpulse_workforce";
-const TERMINATIONS_KEY = "precisionpulse_terminations";
-const DAMAGE_KEY = "precisionpulse_damage_reports";
-const STARTUP_KEY = "precisionpulse_startup_checklists";
-const CHATS_KEY = "precisionpulse_chats";
-const CONTAINERS_KEY = "precisionpulse_containers";
-const WORK_ORDERS_KEY = "precisionpulse_work_orders";
 
 const BUILDINGS = ["ALL", "DC1", "DC5", "DC11", "DC14", "DC18"];
 
-type ContainerWorker = {
-  minutesWorked?: number;
+type WorkforceRow = {
+  id: string;
+  building: string | null;
+  status: string | null;
 };
 
-type ContainerRecord = {
-  building?: string;
-  createdAt?: string;
-  piecesTotal?: number;
-  workers?: ContainerWorker[];
+type ContainerWorker = {
+  minutesWorked?: number | null;
+};
+
+type ContainerRow = {
+  id: string;
+  building: string | null;
+  created_at: string | null;
+  pieces_total: number | null;
+  workers: ContainerWorker[] | null;
+};
+
+type WorkOrderRow = {
+  id: string;
+  building: string | null;
+  status: string | null;
+  created_at: string | null;
+};
+
+type DamageRow = {
+  id: string;
+  building: string | null;
+  status: string | null;
+  pieces_total: number | null;
+  pieces_damaged: number | null;
+};
+
+type TerminationRow = {
+  id: string;
+  building: string | null;
+  created_at: string | null;
+  checklist: Record<string, boolean> | null;
+};
+
+type StartupRow = {
+  id: string;
+  building: string | null;
+  shift: string | null;
+  date: string | null; // YYYY-MM-DD
+  created_at: string | null;
+  completed_at: string | null;
+  items: Record<string, boolean> | null;
+};
+
+type ChatRow = {
+  id: string;
+  building: string | null;
+  created_at: string | null;
+};
+
+type Metrics = {
+  totalWorkers: number;
+  activeWorkers: number;
+  termInProgress: number;
+  termCompleted: number;
+  totalDamageReports: number;
+  openDamageReports: number;
+  avgDamagePercent: number;
+  startupTodayTotal: number;
+  startupTodayCompleted: number;
+  chatsTodayCount: number;
+  containersTotal: number;
+  workOrdersTotal: number;
+  workOrdersOpen: number;
+  containersToday: number;
+  piecesToday: number;
+  minutesToday: number;
+  pphToday: number;
 };
 
 export default function Page() {
@@ -33,100 +90,147 @@ export default function Page() {
 
   const [buildingFilter, setBuildingFilter] = useState<string>("ALL");
 
-  const [workforce, setWorkforce] = useState<any[]>([]);
-  const [terminations, setTerminations] = useState<any[]>([]);
-  const [damageReports, setDamageReports] = useState<any[]>([]);
-  const [startupChecklists, setStartupChecklists] = useState<any[]>([]);
-  const [chats, setChats] = useState<any[]>([]);
-  const [containers, setContainers] = useState<any[]>([]);
-  const [workOrders, setWorkOrders] = useState<any[]>([]);
+  // Data from Supabase
+  const [workforce, setWorkforce] = useState<WorkforceRow[]>([]);
+  const [terminations, setTerminations] = useState<TerminationRow[]>([]);
+  const [damageReports, setDamageReports] = useState<DamageRow[]>([]);
+  const [startupChecklists, setStartupChecklists] = useState<StartupRow[]>([]);
+  const [chats, setChats] = useState<ChatRow[]>([]);
+  const [containers, setContainers] = useState<ContainerRow[]>([]);
+  const [workOrders, setWorkOrders] = useState<WorkOrderRow[]>([]);
 
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-
-    try {
-      const raw = window.localStorage.getItem(WORKFORCE_KEY);
-      if (raw) setWorkforce(JSON.parse(raw));
-    } catch (e) {
-      console.error("Failed to load workforce", e);
-    }
-
-    try {
-      const raw = window.localStorage.getItem(TERMINATIONS_KEY);
-      if (raw) setTerminations(JSON.parse(raw));
-    } catch (e) {
-      console.error("Failed to load terminations", e);
-    }
-
-    try {
-      const raw = window.localStorage.getItem(DAMAGE_KEY);
-      if (raw) setDamageReports(JSON.parse(raw));
-    } catch (e) {
-      console.error("Failed to load damage reports", e);
-    }
-
-    try {
-      const raw = window.localStorage.getItem(STARTUP_KEY);
-      if (raw) setStartupChecklists(JSON.parse(raw));
-    } catch (e) {
-      console.error("Failed to load startup checklists", e);
-    }
-
-    try {
-      const raw = window.localStorage.getItem(CHATS_KEY);
-      if (raw) setChats(JSON.parse(raw));
-    } catch (e) {
-      console.error("Failed to load chats", e);
-    }
-
-    try {
-      const raw = window.localStorage.getItem(CONTAINERS_KEY);
-      if (raw) setContainers(JSON.parse(raw));
-    } catch (e) {
-      console.error("Failed to load containers", e);
-    }
-
-    try {
-      const raw = window.localStorage.getItem(WORK_ORDERS_KEY);
-      if (raw) setWorkOrders(JSON.parse(raw));
-    } catch (e) {
-      console.error("Failed to load work orders", e);
-    }
-  }, []);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [error, setError] = useState<string | null>(null);
 
   const todayStr = new Date().toISOString().slice(0, 10);
 
-  function matchesBuilding(obj: any): boolean {
+  function matchesBuilding(b: string | null): boolean {
     if (buildingFilter === "ALL") return true;
-    const b =
-      obj?.building ||
-      obj?.assignedBuilding ||
-      obj?.homeBuilding ||
-      obj?.buildingCode;
-    return b === buildingFilter;
+    return (b || "") === buildingFilter;
   }
 
-  const metrics = useMemo(() => {
-    const wf = workforce.filter(matchesBuilding);
-    const term = terminations.filter(matchesBuilding);
-    const dmg = damageReports.filter(matchesBuilding);
-    const startup = startupChecklists.filter(matchesBuilding);
-    const chatAll = chats.filter(matchesBuilding);
-    const contAll = containers.filter(matchesBuilding);
-    const wo = workOrders.filter(matchesBuilding);
+  async function loadDashboardData() {
+    setLoading(true);
+    setError(null);
+
+    try {
+      const [
+        wfRes,
+        termRes,
+        dmgRes,
+        startupRes,
+        chatRes,
+        contRes,
+        woRes,
+      ] = await Promise.all([
+        supabase.from("workforce").select("id, building, status"),
+        supabase
+          .from("terminations")
+          .select("id, building, created_at, checklist"),
+        supabase
+          .from("damage_reports")
+          .select("id, building, status, pieces_total, pieces_damaged"),
+        supabase
+          .from("startup_checklists")
+          .select(
+            "id, building, shift, date, created_at, completed_at, items"
+          ),
+        supabase
+          .from("chats")
+          .select("id, building, created_at"),
+        supabase
+          .from("containers")
+          .select("id, building, created_at, pieces_total, workers"),
+        supabase
+          .from("work_orders")
+          .select("id, building, status, created_at"),
+      ]);
+
+      if (wfRes.error)
+        console.error("Error loading workforce", wfRes.error);
+      if (termRes.error)
+        console.error("Error loading terminations", termRes.error);
+      if (dmgRes.error)
+        console.error("Error loading damage reports", dmgRes.error);
+      if (startupRes.error)
+        console.error(
+          "Error loading startup checklists",
+          startupRes.error
+        );
+      if (chatRes.error)
+        console.error("Error loading chats", chatRes.error);
+      if (contRes.error)
+        console.error("Error loading containers", contRes.error);
+      if (woRes.error)
+        console.error("Error loading work orders", woRes.error);
+
+      if (
+        wfRes.error ||
+        termRes.error ||
+        dmgRes.error ||
+        startupRes.error ||
+        chatRes.error ||
+        contRes.error ||
+        woRes.error
+      ) {
+        setError("Some dashboard data failed to load from Supabase.");
+      }
+
+      setWorkforce((wfRes.data || []) as WorkforceRow[]);
+      setTerminations((termRes.data || []) as TerminationRow[]);
+      setDamageReports((dmgRes.data || []) as DamageRow[]);
+      setStartupChecklists((startupRes.data || []) as StartupRow[]);
+      setChats((chatRes.data || []) as ChatRow[]);
+      setContainers((contRes.data || []) as ContainerRow[]);
+      setWorkOrders((woRes.data || []) as WorkOrderRow[]);
+    } catch (e) {
+      console.error("Unexpected dashboard load error", e);
+      setError("Unexpected error loading dashboard data.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!currentUser) return;
+    loadDashboardData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentUser]);
+
+  const metrics: Metrics = useMemo(() => {
+    // Filter all data by building
+    const wf = workforce.filter((w) => matchesBuilding(w.building));
+    const term = terminations.filter((t) =>
+      matchesBuilding(t.building)
+    );
+    const dmg = damageReports.filter((r) =>
+      matchesBuilding(r.building)
+    );
+    const startup = startupChecklists.filter((r) =>
+      matchesBuilding(r.building)
+    );
+    const chatAll = chats.filter((c) => matchesBuilding(c.building));
+    const contAll = containers.filter((c) =>
+      matchesBuilding(c.building)
+    );
+    const wo = workOrders.filter((w) => matchesBuilding(w.building));
 
     const totalWorkers = wf.length;
-    const activeWorkers = wf.filter((w) => w.status === "Active").length;
+    const activeWorkers = wf.filter(
+      (w) => (w.status || "") === "Active"
+    ).length;
 
-    function checklistProgress(c: any) {
-      if (!c) return { total: 0, done: 0 };
-      const vals = Object.values(c) as boolean[];
+    function checklistProgress(
+      checklist: Record<string, boolean> | null | undefined
+    ) {
+      if (!checklist) return { total: 0, done: 0 };
+      const vals = Object.values(checklist) as boolean[];
       const total = vals.length;
       const done = vals.filter(Boolean).length;
       return { total, done };
     }
 
-    function terminationStatus(t: any) {
+    function terminationStatus(t: TerminationRow) {
       const { total, done } = checklistProgress(t.checklist);
       return total > 0 && done === total ? "Completed" : "In Progress";
     }
@@ -137,15 +241,16 @@ export default function Page() {
     const termCompleted = term.length - termInProgress;
 
     const totalDamageReports = dmg.length;
-    const openDamageReports = dmg.filter(
-      (r) => r.status === "Open" || r.status === "In Review"
-    ).length;
+    const openDamageReports = dmg.filter((r) => {
+      const s = (r.status || "").toLowerCase();
+      return s === "open" || s === "in review";
+    }).length;
     const totalPiecesDamage = dmg.reduce(
-      (sum, r) => sum + (r.piecesTotal || 0),
+      (sum, r) => sum + (r.pieces_total || 0),
       0
     );
     const totalDamaged = dmg.reduce(
-      (sum, r) => sum + (r.piecesDamaged || 0),
+      (sum, r) => sum + (r.pieces_damaged || 0),
       0
     );
     const avgDamagePercent =
@@ -153,7 +258,9 @@ export default function Page() {
         ? 0
         : Math.round((totalDamaged / totalPiecesDamage) * 100);
 
-    const startupToday = startup.filter((r) => r.date === todayStr);
+    const startupToday = startup.filter(
+      (r) => (r.date || "").slice(0, 10) === todayStr
+    );
     const startupTodayTotal = startupToday.length;
     const startupTodayCompleted = startupToday.filter((r) => {
       const items = r.items || {};
@@ -162,38 +269,34 @@ export default function Page() {
     }).length;
 
     const chatsToday = chatAll.filter((m) =>
-      (m.createdAt || "").startsWith(todayStr)
+      (m.created_at || "").startsWith(todayStr)
     );
     const chatsTodayCount = chatsToday.length;
 
-    // Containers & throughput
     const containersTotal = contAll.length;
     const workOrdersTotal = wo.length;
-    const workOrdersOpen = wo.filter(
-      (item) => item.status === "Pending" || item.status === "Active"
-    ).length;
+    const workOrdersOpen = wo.filter((item) => {
+      const s = (item.status || "").toLowerCase();
+      return s === "pending" || s === "active";
+    }).length;
 
-    const contToday = contAll.filter((c: ContainerRecord) =>
-      (c.createdAt || "").startsWith(todayStr)
+    const contToday = contAll.filter((c) =>
+      (c.created_at || "").startsWith(todayStr)
     );
-
     const containersToday = contToday.length;
     const piecesToday = contToday.reduce(
-      (sum: number, c: ContainerRecord) => sum + (c.piecesTotal || 0),
+      (sum, c) => sum + (c.pieces_total || 0),
       0
     );
 
-    const minutesToday = contToday.reduce(
-      (outerSum: number, c: ContainerRecord) => {
-        const wArr = c.workers || [];
-        const m = wArr.reduce(
-          (inner, w) => inner + (w.minutesWorked || 0),
-          0
-        );
-        return outerSum + m;
-      },
-      0
-    );
+    const minutesToday = contToday.reduce((outerSum, c) => {
+      const wArr = (c.workers || []) as ContainerWorker[];
+      const m = wArr.reduce(
+        (inner, w) => inner + (w.minutesWorked || 0),
+        0
+      );
+      return outerSum + m;
+    }, 0);
 
     const pphToday =
       minutesToday === 0 ? 0 : (piecesToday * 60) / minutesToday;
@@ -232,11 +335,14 @@ export default function Page() {
   const buildingLabel =
     buildingFilter === "ALL" ? "All Buildings" : buildingFilter;
 
-  // ✅ New Supabase-based logout
-  const handleLogout = async () => {
+  async function handleLogout() {
+    // Supabase sign out
     await supabase.auth.signOut();
+    if (typeof window !== "undefined") {
+      window.localStorage.removeItem("precisionpulse_currentUser");
+    }
     router.push("/auth");
-  };
+  }
 
   // While useCurrentUser is redirecting, don't flash the dashboard
   if (!currentUser) {
@@ -376,6 +482,16 @@ export default function Page() {
                 </span>
                 .
               </p>
+              {loading && (
+                <p className="mt-1 text-[11px] text-slate-500">
+                  Loading live metrics from Supabase…
+                </p>
+              )}
+              {error && (
+                <p className="mt-1 text-[11px] text-amber-400">
+                  {error}
+                </p>
+              )}
             </div>
             <div className="flex flex-col items-end gap-2">
               <div className="flex items-center gap-3">
@@ -393,12 +509,12 @@ export default function Page() {
                     {currentUser.building || "No building set"}
                   </div>
                 </div>
-                {/* ✅ Logout button */}
                 <button
+                  type="button"
                   onClick={handleLogout}
-                  className="rounded-full border border-slate-700 px-3 py-1.5 text-[11px] text-slate-200 hover:bg-slate-800"
+                  className="text-[11px] px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800"
                 >
-                  Log out
+                  Logout
                 </button>
               </div>
               <div className="flex items-center gap-2">
@@ -704,7 +820,7 @@ export default function Page() {
                     Training & Readiness
                   </div>
                   <div className="text-slate-400">
-                    (Hook to Training data later)
+                    (Hooked to Training Supabase data)
                   </div>
                   <Link
                     href="/training"

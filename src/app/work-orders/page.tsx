@@ -97,10 +97,17 @@ export default function WorkOrdersPage() {
     setLoading(true);
     setError(null);
     try {
-      const { data, error } = await supabase
-        .from("work_orders")
-        .select("*")
-        .order("created_at", { ascending: false });
+      let query = supabase
+  .from("containers")
+  .select("*")
+  .order("created_at", { ascending: false });
+
+// If this user is a Lead, only show containers for their building
+if (currentUser?.accessRole === "Lead" && currentUser.building) {
+  query = query.eq("building", currentUser.building);
+}
+
+const { data, error } = await query;
 
       if (error) {
         console.error("Error loading work orders", error);

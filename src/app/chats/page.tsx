@@ -1,448 +1,524 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, FormEvent } from "react";
+import { supabase } from "@/lib/supabaseClient";
+import { useCurrentUser } from "@/lib/useCurrentUser";
 
 const CHATS_STORAGE_KEY = "precisionpulse_chats";
 
 const BUILDINGS = ["DC1", "DC5", "DC11", "DC14", "DC18"];
 const SHIFTS = ["1st", "2nd", "3rd", "4th"];
+const CHANNELS = ["General", "Shift Ops", "HR", "Safety", "Other"];
 
 type ChatMessage = {
   id: string;
   building: string;
   shift: string;
-  authorName: string;
-  role?: string;
-  text: string;
-  attachmentUrl?: string;
-  isPinned: boolean;
+  channel: string;
+  message: string;
   createdAt: string; // ISO
+  authorName?: string;
+  authorEmail?: string;
+  authorRole?: string;
 };
 
+type ChatRow = {
+  id: string;
+  created_at: string;
+  building: string | null;
+  shift: string | null;
+  channel: string | null;
+  message: string | null;
+  author_name: string | null;
+  author_email: string | null;
+  author_role: string | null;
+};
+
+function rowToChat(row: ChatRow): ChatMessage {
+  return {
+    id: String(row.id),
+    building: row.building ?? "DC18",
+    shift: row.shift ?? "1st",
+    channel: row.channel ?? "General",
+    message: row.message ?? "",
+    createdAt: row.created_at ?? new Date().toISOString(),
+    authorName: row.author_name ?? undefined,
+    authorEmail: row.author_email ?? undefined,
+    authorRole: row.author_role ?? undefined,
+  };
+}
+
 export default function ChatsPage() {
+  const currentUser = useCurrentUser();
+
   const [messages, setMessages] = useState<ChatMessage[]>([]);
 
-  // Current channel selection
-  const [building, setBuilding] = useState(BUILDINGS[0]);
-  const [shift, setShift] = useState(SHIFTS[0]);
+  // Filters
+  const [filterBuilding, setFilterBuilding] = useState<string>("ALL");
+  const [filterShift, setFilterShift] = useState<string>("ALL");
+  const [filterChannel, setFilterChannel] = useState<string>("ALL");
 
-  // Composer state
-  const [authorName, setAuthorName] = useState("Lead");
-  const [role, setRole] = useState("Lead");
-  const [text, setText] = useState("");
-  const [attachmentUrl, setAttachmentUrl] = useState("");
+  // Compose state
+  const [building, setBuilding] = useState<string>("DC18");
+  const [shift, setShift] = useState<string>("1st");
+  const [channel, setChannel] = useState<string>("General");
+  const [text, setText] = useState<string>("");
 
-  // Filters/search
-  const [search, setSearch] = useState("");
-
+  const [loading, setLoading] = useState(true);
+  const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Load from localStorage
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    try {
-      const raw = window.localStorage.getItem(CHATS_STORAGE_KEY);
-      if (raw) {
-        setMessages(JSON.parse(raw));
-      }
-    } catch (e) {
-      console.error("Failed to load chats", e);
-    }
-  }, []);
-
-  function saveMessages(next: ChatMessage[]) {
+  function persist(next: ChatMessage[]) {
     setMessages(next);
     if (typeof window !== "undefined") {
       window.localStorage.setItem(CHATS_STORAGE_KEY, JSON.stringify(next));
     }
   }
 
-  // Messages for current channel
-  const channelMessages = useMemo(() => {
-    const filtered = messages.filter(
-      (m) => m.building === building && m.shift === shift
-    );
+  async function refreshFromSupabase() {
+    if (!currentUser) return;
 
-    const searched = search.trim()
-      ? filtered.filter((m) =>
-          (m.text + " " + (m.authorName || "") + " " + (m.role || ""))
-            .toLowerCase()
-            .includes(search.trim().toLowerCase())
-        )
-      : filtered;
-
-    // Pinned first, then newest first
-    const pinned = searched.filter((m) => m.isPinned);
-    const regular = searched.filter((m) => !m.isPinned);
-
-    const sortByTimeDesc = (arr: ChatMessage[]) =>
-      [...arr].sort(
-        (a, b) =>
-          new Date(b.createdAt).getTime() -
-          new Date(a.createdAt).getTime()
-      );
-
-    return {
-      pinned: sortByTimeDesc(pinned),
-      regular: sortByTimeDesc(regular),
-    };
-  }, [messages, building, shift, search]);
-
-  const channelSummary = useMemo(() => {
-    const byChannel: Record<
-      string,
-      { total: number; lastMessage?: string }
-    > = {};
-
-    for (const b of BUILDINGS) {
-      for (const s of SHIFTS) {
-        const key = `${b}-${s}`;
-        byChannel[key] = { total: 0 };
-      }
-    }
-
-    for (const m of messages) {
-      const key = `${m.building}-${m.shift}`;
-      if (!byChannel[key]) {
-        byChannel[key] = { total: 0 };
-      }
-      byChannel[key].total++;
-      byChannel[key].lastMessage = m.createdAt;
-    }
-
-    return byChannel;
-  }, [messages]);
-
-  function handleSend(e: React.FormEvent) {
-    e.preventDefault();
+    setLoading(true);
     setError(null);
 
-    if (!text.trim()) {
-      setError("Message text is required.");
+    try {
+      let query = supabase
+  .from("containers")
+  .select("*")
+  .order("created_at", { ascending: false });
+
+// If this user is a Lead, only show containers for their building
+if (currentUser?.accessRole === "Lead" && currentUser.building) {
+  query = query.eq("building", currentUser.building);
+}
+
+const { data, error } = await query;
+
+      if (error) {
+        console.error("Error loading chats", error);
+        setError("Failed to load chats from server.");
+        return;
+      }
+
+      const rows = (data || []) as ChatRow[];
+      const mapped = rows.map(rowToChat);
+      persist(mapped);
+    } catch (e) {
+      console.error("Unexpected error loading chats", e);
+      setError("Unexpected error loading chats.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!currentUser) return;
+    refreshFromSupabase();
+  }, [currentUser]);
+
+  const filteredMessages = useMemo(() => {
+    return messages.filter((m) => {
+      if (filterBuilding !== "ALL" && m.building !== filterBuilding) {
+        return false;
+      }
+      if (filterShift !== "ALL" && m.shift !== filterShift) {
+        return false;
+      }
+      if (filterChannel !== "ALL" && m.channel !== filterChannel) {
+        return false;
+      }
+      return true;
+    });
+  }, [messages, filterBuilding, filterShift, filterChannel]);
+
+  const buildingLabel =
+    filterBuilding === "ALL" ? "All Buildings" : filterBuilding;
+
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const todayCount = filteredMessages.filter((m) =>
+    (m.createdAt || "").startsWith(todayStr)
+  ).length;
+
+  async function handleSend(e: FormEvent) {
+    e.preventDefault();
+    if (sending) return;
+
+    const trimmed = text.trim();
+    if (!trimmed) return;
+
+    setSending(true);
+    setError(null);
+
+    try {
+      const payload = {
+        building,
+        shift,
+        channel,
+        message: trimmed,
+        author_name: currentUser?.name ?? null,
+        author_email: currentUser?.email ?? null,
+        author_role: currentUser?.accessRole ?? null,
+      };
+
+      const { error } = await supabase.from("chats").insert(payload);
+
+      if (error) {
+        console.error("Error sending chat message", error);
+        setError("Failed to send message.");
+        return;
+      }
+
+      setText("");
+      await refreshFromSupabase();
+    } catch (e) {
+      console.error("Unexpected error sending message", e);
+      setError("Unexpected error sending message.");
+    } finally {
+      setSending(false);
+    }
+  }
+
+  async function handleDelete(id: string) {
+    if (!currentUser || currentUser.accessRole !== "Super Admin") {
+      // Extra safety on the client side
       return;
     }
 
-    const now = new Date().toISOString();
-    const newMsg: ChatMessage = {
-      id: `${Date.now()}`,
-      building,
-      shift,
-      authorName: authorName.trim() || "Unknown",
-      role: role.trim() || undefined,
-      text: text.trim(),
-      attachmentUrl: attachmentUrl.trim() || undefined,
-      isPinned: false,
-      createdAt: now,
-    };
+    if (typeof window !== "undefined") {
+      const ok = window.confirm("Delete this message?");
+      if (!ok) return;
+    }
 
-    const next = [...messages, newMsg];
-    saveMessages(next);
+    setError(null);
 
-    setText("");
-    setAttachmentUrl("");
+    try {
+      const { error } = await supabase
+        .from("chats")
+        .delete()
+        .eq("id", id);
+
+      if (error) {
+        console.error("Error deleting chat message", error);
+        setError("Failed to delete message.");
+        return;
+      }
+
+      await refreshFromSupabase();
+    } catch (e) {
+      console.error("Unexpected error deleting message", e);
+      setError("Unexpected error deleting message.");
+    }
   }
 
-  function togglePin(id: string) {
-    const next = messages.map((m) =>
-      m.id === id ? { ...m, isPinned: !m.isPinned } : m
+  // Route protection
+  if (!currentUser) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-400 flex flex-col items-center justify-center text-sm gap-2">
+        <div>Redirecting to login…</div>
+        <a
+          href="/auth"
+          className="text-sky-400 text-xs underline hover:text-sky-300"
+        >
+          Click here if you are not redirected.
+        </a>
+      </div>
     );
-    saveMessages(next);
   }
+
+  const isSuperAdmin = currentUser.accessRole === "Super Admin";
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-semibold text-slate-50">
-            Chats & Shift Communication
-          </h1>
-          <p className="text-sm text-slate-400">
-            Building and shift-based communication hub for leads, managers,
-            and HR. Pinned messages stay at the top for critical updates.
-          </p>
-        </div>
-        <Link
-          href="/"
-          className="text-xs px-3 py-1 rounded-full border border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800"
-        >
-          ← Back to Dashboard
-        </Link>
-      </div>
-
-      {/* Layout: channel list + chat panel */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Channel overview */}
-        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-4">
+    <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-950 to-slate-900 text-slate-50">
+      <div className="mx-auto max-w-6xl p-6 space-y-6">
+        {/* Header */}
+        <div className="flex items-center justify-between gap-4">
           <div>
-            <h2 className="text-sm font-semibold text-slate-100 mb-1">
-              Channels
-            </h2>
-            <p className="text-xs text-slate-500">
-              One channel per building and shift. Select a channel to view
-              its messages.
+            <h1 className="text-2xl font-semibold text-slate-50">
+              Building / Shift Chats
+            </h1>
+            <p className="text-sm text-slate-400">
+              Quick communications hub for leads, building managers, HR, and
+              lumpers. Messages are grouped by building, shift, and channel.
             </p>
           </div>
+          <Link
+            href="/"
+            className="text-xs px-3 py-1 rounded-full border border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800"
+          >
+            ← Back to Dashboard
+          </Link>
+        </div>
 
-          <div className="space-y-2 text-xs max-h-[420px] overflow-auto pr-1">
-            {BUILDINGS.map((b) => (
-              <div key={b}>
-                <div className="text-[11px] text-slate-400 mb-1 mt-2">
-                  {b}
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  {SHIFTS.map((s) => {
-                    const key = `${b}-${s}`;
-                    const stats = channelSummary[key] || {
-                      total: 0,
-                      lastMessage: undefined,
-                    };
-                    const isActive =
-                      building === b && shift === s;
-
-                    return (
-                      <button
-                        key={key}
-                        type="button"
-                        onClick={() => {
-                          setBuilding(b);
-                          setShift(s);
-                        }}
-                        className={`text-left rounded-xl border px-2 py-2 ${
-                          isActive
-                            ? "bg-sky-900/40 border-sky-700 text-sky-100"
-                            : "bg-slate-950 border-slate-700 text-slate-200 hover:bg-slate-800/60"
-                        }`}
-                      >
-                        <div className="text-[11px] font-semibold">
-                          {s} Shift
-                        </div>
-                        <div className="text-[10px] text-slate-400">
-                          Msgs:{" "}
-                          <span className="text-slate-100">
-                            {stats.total}
-                          </span>
-                        </div>
-                        {stats.lastMessage && (
-                          <div className="text-[10px] text-slate-500">
-                            Last: {stats.lastMessage.slice(0, 10)}
-                          </div>
-                        )}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            ))}
+        {/* Top summary */}
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 text-xs">
+          <div className="rounded-2xl bg-slate-900 border border-slate-800 p-4">
+            <div className="text-slate-400 mb-1">Messages Today</div>
+            <div className="text-2xl font-semibold text-sky-300">
+              {todayCount}
+            </div>
+            <div className="text-[11px] text-slate-500 mt-1">
+              Filtered view: {buildingLabel}
+            </div>
+          </div>
+          <div className="rounded-2xl bg-slate-900 border border-slate-800 p-4">
+            <div className="text-slate-400 mb-1">Total Messages</div>
+            <div className="text-2xl font-semibold text-slate-100">
+              {filteredMessages.length}
+            </div>
+            <div className="text-[11px] text-slate-500 mt-1">
+              After current filters
+            </div>
+          </div>
+          <div className="rounded-2xl bg-slate-900 border border-slate-800 p-4">
+            <div className="text-slate-400 mb-1">Your Building</div>
+            <div className="text-lg font-semibold text-emerald-300">
+              {currentUser.building || "Unset"}
+            </div>
+            <div className="text-[11px] text-slate-500 mt-1">
+              From your profile
+            </div>
+          </div>
+          <div className="rounded-2xl bg-slate-900 border border-slate-800 p-4">
+            <div className="text-slate-400 mb-1">Your Role</div>
+            <div className="text-lg font-semibold text-amber-300">
+              {currentUser.accessRole || "Worker"}
+            </div>
+            <div className="text-[11px] text-slate-500 mt-1">
+              Controls what you can see elsewhere
+            </div>
           </div>
         </div>
 
-        {/* Chat panel */}
-        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-4 lg:col-span-2">
-          {/* Channel info + search */}
-          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
-            <div>
-              <h2 className="text-sm font-semibold text-slate-100">
-                {building} • {shift} Shift
-              </h2>
-              <p className="text-xs text-slate-500">
-                Use this channel for shift handoffs, staffing notes, damage
-                alerts, and performance updates.
-              </p>
-            </div>
-            <input
-              className="w-full md:w-64 rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-xs text-slate-50"
-              placeholder="Search messages…"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-            />
+        {/* Error */}
+        {error && (
+          <div className="text-xs text-red-300 bg-red-950/40 border border-red-800 rounded px-3 py-2">
+            {error}
           </div>
+        )}
 
-          {/* Messages area */}
-          <div className="bg-slate-950 border border-slate-800 rounded-2xl p-3 flex flex-col h-[360px]">
-            <div className="flex-1 overflow-y-auto space-y-2 pr-1 text-xs">
-              {/* Pinned section */}
-              {channelMessages.pinned.length > 0 && (
-                <div className="mb-3 pb-2 border-b border-slate-800">
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className="text-[11px] text-amber-300">
-                      📌 Pinned
-                    </span>
-                    <span className="flex-1 h-px bg-slate-800" />
-                  </div>
-                  {channelMessages.pinned.map((m) => (
-                    <MessageBubble
-                      key={m.id}
-                      message={m}
-                      onTogglePin={() => togglePin(m.id)}
-                    />
-                  ))}
+        {/* Filters + content */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          {/* Compose panel */}
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 text-xs space-y-3">
+            <div className="flex items-center justify-between mb-1">
+              <div className="text-slate-200 text-sm font-semibold">
+                New Message
+              </div>
+              {loading && (
+                <div className="text-[11px] text-slate-500">
+                  Loading chat history…
                 </div>
-              )}
-
-              {/* Regular messages */}
-              {channelMessages.regular.length === 0 &&
-              channelMessages.pinned.length === 0 ? (
-                <p className="text-xs text-slate-500">
-                  No messages yet. Be the first to post for this channel.
-                </p>
-              ) : (
-                channelMessages.regular.map((m) => (
-                  <MessageBubble
-                    key={m.id}
-                    message={m}
-                    onTogglePin={() => togglePin(m.id)}
-                  />
-                ))
               )}
             </div>
 
-            {/* Composer */}
-            <form
-              onSubmit={handleSend}
-              className="pt-3 mt-3 border-t border-slate-800 space-y-2 text-xs"
-            >
-              {error && (
-                <div className="text-[11px] text-red-300 bg-red-950/40 border border-red-800 rounded px-2 py-1">
-                  {error}
-                </div>
-              )}
-
+            <form onSubmit={handleSend} className="space-y-3">
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="block text-[10px] text-slate-400 mb-1">
-                    Your Name
+                  <label className="block text-[11px] text-slate-400 mb-1">
+                    Building
                   </label>
-                  <input
-                    className="w-full rounded-lg bg-slate-900 border border-slate-700 px-2 py-1.5 text-xs text-slate-50"
-                    value={authorName}
-                    onChange={(e) =>
-                      setAuthorName(e.target.value)
-                    }
-                    placeholder="e.g. Nick, Malik, Montory"
-                  />
+                  <select
+                    className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
+                    value={building}
+                    onChange={(e) => setBuilding(e.target.value)}
+                  >
+                    {BUILDINGS.map((b) => (
+                      <option key={b} value={b}>
+                        {b}
+                      </option>
+                    ))}
+                  </select>
                 </div>
                 <div>
-                  <label className="block text-[10px] text-slate-400 mb-1">
-                    Role (optional)
+                  <label className="block text-[11px] text-slate-400 mb-1">
+                    Shift
                   </label>
-                  <input
-                    className="w-full rounded-lg bg-slate-900 border border-slate-700 px-2 py-1.5 text-xs text-slate-50"
-                    value={role}
-                    onChange={(e) => setRole(e.target.value)}
-                    placeholder="Lead, Manager, HR, etc."
-                  />
+                  <select
+                    className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
+                    value={shift}
+                    onChange={(e) => setShift(e.target.value)}
+                  >
+                    {SHIFTS.map((s) => (
+                      <option key={s} value={s}>
+                        {s}
+                      </option>
+                    ))}
+                  </select>
                 </div>
               </div>
 
               <div>
-                <label className="block text-[10px] text-slate-400 mb-1">
+                <label className="block text-[11px] text-slate-400 mb-1">
+                  Channel
+                </label>
+                <select
+                  className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
+                  value={channel}
+                  onChange={(e) => setChannel(e.target.value)}
+                >
+                  {CHANNELS.map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[11px] text-slate-400 mb-1">
                   Message
                 </label>
                 <textarea
-                  className="w-full rounded-lg bg-slate-900 border border-slate-700 px-2 py-1.5 text-xs text-slate-50"
-                  rows={2}
+                  rows={4}
+                  className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50 resize-none"
+                  placeholder="Quick update for this shift…"
                   value={text}
                   onChange={(e) => setText(e.target.value)}
-                  placeholder="e.g. DC1 1st shift: 4 containers left on dock, damage on trailer 123, need 1 extra clamp driver."
                 />
               </div>
 
-              <div>
-                <label className="block text-[10px] text-slate-400 mb-1">
-                  Attachment / Photo URL (optional)
-                </label>
-                <input
-                  className="w-full rounded-lg bg-slate-900 border border-slate-700 px-2 py-1.5 text-xs text-slate-50"
-                  value={attachmentUrl}
-                  onChange={(e) =>
-                    setAttachmentUrl(e.target.value)
-                  }
-                  placeholder="Paste image URL or file link"
-                />
-                <p className="text-[10px] text-slate-500 mt-0.5">
-                  For now this is URL-only (e.g. shared drive or image link).
-                </p>
-              </div>
+              <button
+                type="submit"
+                disabled={sending || !text.trim()}
+                className="w-full rounded-lg bg-sky-600 hover:bg-sky-500 disabled:opacity-60 text-[11px] font-medium text-white px-4 py-2"
+              >
+                {sending ? "Sending…" : "Send Message"}
+              </button>
 
-              <div className="flex items-center justify-between gap-2">
-                <div className="text-[10px] text-slate-500">
-                  Channel: {building} • {shift} shift
-                </div>
-                <button
-                  type="submit"
-                  className="rounded-lg bg-sky-600 hover:bg-sky-500 text-xs font-medium text-white px-3 py-1.5"
-                >
-                  Send Message
-                </button>
-              </div>
+              <p className="text-[10px] text-slate-500 mt-1">
+                Messages are visible to anyone with access to this dashboard,
+                filtered by building/shift/channel.
+              </p>
             </form>
           </div>
-        </div>
-      </div>
-    </div>
-  );
-}
 
-/** Single message bubble */
-function MessageBubble({
-  message,
-  onTogglePin,
-}: {
-  message: ChatMessage;
-  onTogglePin: () => void;
-}) {
-  const time = new Date(message.createdAt)
-    .toTimeString()
-    .slice(0, 5);
+          {/* Filters + list */}
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 text-xs lg:col-span-2 space-y-4">
+            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+              <div>
+                <div className="text-slate-200 text-sm font-semibold">
+                  Chat History
+                </div>
+                <div className="text-[11px] text-slate-500">
+                  Sorted by time, oldest at the top.
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <select
+                  className="rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-slate-50"
+                  value={filterBuilding}
+                  onChange={(e) => setFilterBuilding(e.target.value)}
+                >
+                  <option value="ALL">All Buildings</option>
+                  {BUILDINGS.map((b) => (
+                    <option key={b} value={b}>
+                      {b}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  className="rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-slate-50"
+                  value={filterShift}
+                  onChange={(e) => setFilterShift(e.target.value)}
+                >
+                  <option value="ALL">All Shifts</option>
+                  {SHIFTS.map((s) => (
+                    <option key={s} value={s}>
+                      {s}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  className="rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-slate-50"
+                  value={filterChannel}
+                  onChange={(e) => setFilterChannel(e.target.value)}
+                >
+                  <option value="ALL">All Channels</option>
+                  {CHANNELS.map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFilterBuilding("ALL");
+                    setFilterShift("ALL");
+                    setFilterChannel("ALL");
+                  }}
+                  className="text-[11px] text-sky-300 hover:underline"
+                >
+                  Reset Filters
+                </button>
+              </div>
+            </div>
 
-  return (
-    <div className="flex gap-2">
-      <div className="w-1 rounded-full bg-sky-700 mt-1" />
-      <div className="flex-1">
-        <div className="flex items-center justify-between gap-2">
-          <div className="flex flex-col">
-            <span className="text-[11px] text-slate-100 font-semibold">
-              {message.authorName}
-              {message.role && (
-                <span className="text-[10px] text-slate-400">
-                  {" "}
-                  • {message.role}
-                </span>
-              )}
-            </span>
-            <span className="text-[10px] text-slate-500">
-              {time}
-            </span>
+            {filteredMessages.length === 0 ? (
+              <p className="text-sm text-slate-500">
+                No messages match the current filters.
+              </p>
+            ) : (
+              <div className="space-y-2 max-h-[520px] overflow-auto pr-1">
+                {filteredMessages.map((m) => (
+                  <div
+                    key={m.id}
+                    className="rounded-xl border border-slate-800 bg-slate-950 px-3 py-2 flex gap-3"
+                  >
+                    <div className="pt-1">
+                      <div className="w-8 h-8 rounded-full bg-slate-800 flex items-center justify-center text-[10px] text-slate-200">
+                        {m.authorName
+                          ? m.authorName
+                              .split(" ")
+                              .map((p) => p[0])
+                              .join("")
+                              .toUpperCase()
+                              .slice(0, 2)
+                          : "??"}
+                      </div>
+                    </div>
+                    <div className="flex-1 space-y-1">
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <div className="text-[11px] text-slate-200 font-medium">
+                            {m.authorName || "Unknown User"}
+                            {m.authorRole && (
+                              <span className="ml-1 inline-flex items-center rounded-full border border-slate-700 bg-slate-900 px-2 py-0.5 text-[9px] text-sky-200">
+                                {m.authorRole}
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-[10px] text-slate-500">
+                            {m.building} • {m.shift} • {m.channel}
+                          </div>
+                        </div>
+                        <div className="text-right space-y-1">
+                          <div className="text-[10px] text-slate-500 font-mono">
+                            {m.createdAt.slice(0, 10)}{" "}
+                            {m.createdAt.slice(11, 16)}
+                          </div>
+                          {isSuperAdmin && (
+                            <button
+                              type="button"
+                              onClick={() => handleDelete(m.id)}
+                              className="text-[10px] text-rose-300 hover:underline"
+                            >
+                              Delete
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      <div className="text-[11px] text-slate-100 whitespace-pre-wrap">
+                        {m.message}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
-          <button
-            type="button"
-            onClick={onTogglePin}
-            className={`text-[10px] px-2 py-0.5 rounded-full border ${
-              message.isPinned
-                ? "bg-amber-900/60 border-amber-700 text-amber-100"
-                : "bg-slate-900 border-slate-700 text-slate-300 hover:bg-slate-800"
-            }`}
-          >
-            {message.isPinned ? "Unpin" : "Pin"}
-          </button>
         </div>
-        <div className="mt-1 text-[11px] text-slate-100 whitespace-pre-wrap">
-          {message.text}
-        </div>
-        {message.attachmentUrl && (
-          <div className="mt-1">
-            <a
-              href={message.attachmentUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="text-[10px] text-sky-300 underline"
-            >
-              View attachment
-            </a>
-          </div>
-        )}
       </div>
     </div>
   );
