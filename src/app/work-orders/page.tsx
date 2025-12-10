@@ -563,8 +563,7 @@ export default function WorkOrdersPage() {
                   Work Order List
                 </div>
                 <div className="text-[11px] text-slate-500">
-                  Click Edit to change, Delete to remove and unlink
-                  containers.
+                  Click a work order name to open and see containers.
                 </div>
               </div>
 
@@ -605,20 +604,27 @@ export default function WorkOrdersPage() {
                       {displayedOrders.map((wo) => {
                         const containersForThis = containersForOrder(wo.id);
                         const dateShort = wo.createdAt.slice(0, 10);
+
                         return (
                           <tr
                             key={wo.id}
                             className="border-b border-slate-800/60 hover:bg-slate-900/60"
                           >
                             <td className="px-3 py-2 text-slate-100">
-                              <div className="text-xs font-medium">
-                                {wo.name}
-                              </div>
-                              {wo.notes && (
-                                <div className="text-[11px] text-slate-500 line-clamp-1">
-                                  {wo.notes}
-                                </div>
-                              )}
+                              <Link
+                                href={`/work-orders/${wo.id}`}
+                                className="flex flex-col text-xs font-medium text-sky-300 hover:underline"
+                              >
+                                <span>{wo.name}</span>
+                                {wo.notes && (
+                                  <span className="text-[11px] text-slate-500 line-clamp-1">
+                                    {wo.notes}
+                                  </span>
+                                )}
+                                <span className="text-[10px] text-sky-400 mt-0.5">
+                                  View details & containers
+                                </span>
+                              </Link>
                             </td>
                             <td className="px-3 py-2 text-slate-300">
                               {wo.building}

@@ -8,6 +8,9 @@ import { BUILDINGS } from "@/lib/buildings";
 
 const BUILDING_OPTIONS = ["ALL", ...BUILDINGS];
 
+const WORK_ORDERS_KEY = "precisionpulse_work_orders";
+const CONTAINERS_KEY = "precisionpulse_containers";
+
 const DATE_RANGES = ["Today", "Last 7 days", "Last 30 days", "All time"] as const;
 type DateRange = (typeof DATE_RANGES)[number];
 
@@ -17,25 +20,41 @@ type ContainerWorker = {
   minutesWorked?: number | null;
   percentContribution?: number | null;
   payoutAmount?: number | null;
+  // allow extra fields
+  [key: string]: any;
 };
 
 type ContainerRow = {
   id: string;
+  workOrderId?: string | null;
   building?: string | null;
   shift?: string | null;
-  date?: string | null; // YYYY-MM-DD
+  date?: string | null;
   container_no?: string | null;
   pieces_total?: number | null;
   skus_total?: number | null;
   container_pay_total?: number | null;
   workers?: ContainerWorker[] | null;
+  // allow extra fields
+  [key: string]: any;
+};
+
+type WorkOrderRecord = {
+  id: string;
+  name: string;
+  building?: string;
+  shift?: string;
+  status?: string;
+  createdAt?: string;
+  notes?: string;
+  [key: string]: any;
 };
 
 type StaffingRow = {
   id: string;
   building?: string | null;
   shift?: string | null;
-  date?: string | null; // YYYY-MM-DD
+  date?: string | null;
   required_headcount?: number | null;
   actual_headcount?: number | null;
 };
@@ -44,6 +63,8 @@ type ProductionPayRow = {
   date: string;
   building: string;
   shift: string;
+  workOrderId?: string;
+  workOrderName?: string;
   containerNo: string;
   workerName: string;
   minutesWorked: number;
@@ -90,7 +111,9 @@ function parseDateOnly(value: string | null | undefined): string | null {
 }
 
 function isWithinRange(dateStr: string | null, range: DateRange): boolean {
-  if (!dateStr) return false;
+  if (!dateStr) {
+    return range === "All time";
+  }
   if (range === "All time") return true;
 
   const only = dateStr.slice(0, 10);
@@ -118,6 +141,131 @@ function isWithinRange(dateStr: string | null, range: DateRange): boolean {
   }
 
   return true;
+}
+
+/**
+ * Helper readers that try multiple key names.
+ * Adjust/add aliases here if your real field names are different.
+ */
+function getContainerDate(c: ContainerRow): string | null {
+  return (
+    parseDateOnly(
+      (c.date as string | undefined) ??
+        (c.work_date as string | undefined) ??
+        (c.workDate as string | undefined) ??
+        (c.created_at as string | undefined) ??
+        null
+    ) ?? null
+  );
+}
+
+function getContainerBuilding(c: ContainerRow): string {
+  return (
+    (c.building as string | undefined) ??
+    (c.bldg as string | undefined) ??
+    (c.location as string | undefined) ??
+    ""
+  );
+}
+
+function getContainerShift(c: ContainerRow): string {
+  return (
+    (c.shift as string | undefined) ??
+    (c.shift_name as string | undefined) ??
+    (c.shiftName as string | undefined) ??
+    ""
+  );
+}
+
+function getContainerNo(c: ContainerRow): string {
+  return (
+    (c.container_no as string | undefined) ??
+    (c.containerNo as string | undefined) ??
+    (c.container_number as string | undefined) ??
+    (c.container_num as string | undefined) ??
+    (c.containerId as string | undefined) ??
+    (c.container_id as string | undefined) ??
+    String(c.id ?? "")
+  );
+}
+
+// 🔧 FIXED: broaden aliases for piece count and guard for NaN
+function getPiecesTotal(c: ContainerRow): number {
+  const possible =
+    (c.pieces_total as number | undefined) ??
+    (c.pieces as number | undefined) ??
+    (c.total_pieces as number | undefined) ??
+    (c.pieceCount as number | undefined) ??
+    (c.piecesTotal as number | undefined) ??
+    (c.totalPieces as number | undefined) ??
+    (c.totalPieceCount as number | undefined) ??
+    (c.piece_count as number | undefined) ??
+    (c.total_piece_count as number | undefined);
+
+  return typeof possible === "number" && !Number.isNaN(possible)
+    ? possible
+    : 0;
+}
+
+function getSkusTotal(c: ContainerRow): number {
+  return (
+    (c.skus_total as number | undefined) ??
+    (c.skuCount as number | undefined) ??
+    (c.total_skus as number | undefined) ??
+    0
+  );
+}
+
+function getContainerPayTotal(c: ContainerRow): number {
+  return (
+    (c.container_pay_total as number | undefined) ??
+    (c.containerPayTotal as number | undefined) ??
+    (c.containerPay as number | undefined) ??
+    (c.totalPay as number | undefined) ??
+    (c.pay_total as number | undefined) ??
+    0
+  );
+}
+
+function getWorkerName(w: ContainerWorker): string {
+  return (
+    (w.workerName as string | undefined) ??
+    (w.name as string | undefined) ??
+    (w.fullName as string | undefined) ??
+    (w.worker_name as string | undefined) ??
+    "Unknown Worker"
+  );
+}
+
+function getWorkerMinutes(w: ContainerWorker): number {
+  return (
+    (w.minutesWorked as number | undefined) ??
+    (w.minutes as number | undefined) ??
+    (w.mins as number | undefined) ??
+    (w.timeMinutes as number | undefined) ??
+    0
+  );
+}
+
+function getWorkerPercent(w: ContainerWorker): number {
+  return (
+    (w.percentContribution as number | undefined) ??
+    (w.percent as number | undefined) ??
+    (w.share as number | undefined) ??
+    (w.sharePercent as number | undefined) ??
+    0
+  );
+}
+
+function getWorkerPayout(w: ContainerWorker): number {
+  return (
+    (w.payoutAmount as number | undefined) ??
+    (w.payout as number | undefined) ??
+    (w.pay as number | undefined) ??
+    (w.payAmount as number | undefined) ??
+    (w.amount as number | undefined) ??
+    0
+  );
 }
 
 function downloadCsv(filename: string, header: string[], rows: (string | number)[][]) {
@@ -153,6 +301,7 @@ export default function ReportsPage() {
   const leadBuilding = currentUser?.building || "";
 
   const [containers, setContainers] = useState<ContainerRow[]>([]);
+  const [workOrders, setWorkOrders] = useState<WorkOrderRecord[]>([]);
   const [staffing, setStaffing] = useState<StaffingRow[]>([]);
 
   const [loading, setLoading] = useState<boolean>(true);
@@ -161,55 +310,64 @@ export default function ReportsPage() {
   const [buildingFilter, setBuildingFilter] = useState<string>("ALL");
   const [dateRange, setDateRange] = useState<DateRange>("Last 7 days");
 
-  // Fetch data from Supabase
+  // Load containers + work orders from localStorage
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    try {
+      const contRaw = window.localStorage.getItem(CONTAINERS_KEY);
+      if (contRaw) {
+        const parsed = JSON.parse(contRaw);
+        if (Array.isArray(parsed)) {
+          setContainers(parsed as ContainerRow[]);
+        }
+      }
+
+      const woRaw = window.localStorage.getItem(WORK_ORDERS_KEY);
+      if (woRaw) {
+        const parsed = JSON.parse(woRaw);
+        if (Array.isArray(parsed)) {
+          setWorkOrders(parsed as WorkOrderRecord[]);
+        }
+      }
+    } catch (e) {
+      console.error("Error loading containers/work orders from localStorage", e);
+    }
+  }, []);
+
+  // Fetch staffing data from Supabase
   useEffect(() => {
     if (!currentUser) return;
 
-    async function load() {
+    async function loadStaffing() {
       setLoading(true);
       setError(null);
       try {
-        // Base queries
-        let contQuery = supabase.from("containers").select("*");
         let staffQuery = supabase.from("staffing_plans").select("*");
 
-        // If Lead, limit to their building server-side
         if (isLead && leadBuilding) {
-          contQuery = contQuery.eq("building", leadBuilding);
           staffQuery = staffQuery.eq("building", leadBuilding);
         }
 
-        const [contRes, staffRes] = await Promise.all([contQuery, staffQuery]);
-
-        if (contRes.error) {
-          console.error("Error loading containers for reports", contRes.error);
-          setError("Failed to load container data from Supabase.");
-        } else {
-          setContainers((contRes.data || []) as ContainerRow[]);
-        }
+        const staffRes = await staffQuery;
 
         if (staffRes.error) {
           console.error("Error loading staffing coverage for reports", staffRes.error);
-          setError((prev) =>
-            prev
-              ? prev + " Some staffing data also failed."
-              : "Failed to load staffing data from Supabase."
-          );
+          setError("Failed to load staffing data from Supabase.");
         } else {
           setStaffing((staffRes.data || []) as StaffingRow[]);
         }
       } catch (e) {
-        console.error("Unexpected reports load error", e);
+        console.error("Unexpected reports staffing load error", e);
         setError("Unexpected error loading reports data.");
       } finally {
         setLoading(false);
       }
     }
 
-    load();
+    loadStaffing();
   }, [currentUser, isLead, leadBuilding]);
 
-  // When user is a Lead, lock building filter to their building
   useEffect(() => {
     if (isLead && leadBuilding) {
       setBuildingFilter(leadBuilding);
@@ -224,47 +382,62 @@ export default function ReportsPage() {
     return (b || "") === effectiveBuildingFilter;
   }
 
-  // Filtered containers and staffing based on building + date range
+  // Filtered containers and staffing
   const filteredContainers = useMemo(() => {
-    return containers.filter(
-      (c) =>
-        matchesBuilding(c.building ?? null) &&
-        isWithinRange(parseDateOnly(c.date), dateRange)
-    );
+    return containers.filter((c) => {
+      if (!matchesBuilding(getContainerBuilding(c))) return false;
+      const d = getContainerDate(c);
+      return isWithinRange(d, dateRange);
+    });
   }, [containers, effectiveBuildingFilter, dateRange]);
 
   const filteredStaffing = useMemo(() => {
-    return staffing.filter(
-      (s) =>
-        matchesBuilding(s.building ?? null) &&
-        isWithinRange(parseDateOnly(s.date), dateRange)
-    );
+    return staffing.filter((s) => {
+      if (!matchesBuilding(s.building ?? null)) return false;
+      const d = parseDateOnly(s.date ?? null);
+      return isWithinRange(d, dateRange);
+    });
   }, [staffing, effectiveBuildingFilter, dateRange]);
 
-  // 1) Production Pay Report rows
+  // Map work orders by id
+  const workOrderMap = useMemo(() => {
+    const map = new Map<string, WorkOrderRecord>();
+    for (const wo of workOrders) {
+      map.set(String(wo.id), wo);
+    }
+    return map;
+  }, [workOrders]);
+
+  // 1) Production Pay rows
   const productionRows: ProductionPayRow[] = useMemo(() => {
     const rows: ProductionPayRow[] = [];
 
     for (const c of filteredContainers) {
-      const date = parseDateOnly(c.date ?? null) || "";
-      const building = c.building || "";
-      const shift = c.shift || "";
-      const containerNo = c.container_no || "";
-      const piecesTotal = c.pieces_total || 0;
-      const skusTotal = c.skus_total || 0;
-      const containerPay = c.container_pay_total || 0;
-      const workersArr = c.workers || [];
+      const date = getContainerDate(c) || "";
+      const building = getContainerBuilding(c);
+      const shift = getContainerShift(c);
+      const containerNo = getContainerNo(c);
+      const piecesTotal = getPiecesTotal(c);
+      const skusTotal = getSkusTotal(c);
+      const containerPay = getContainerPayTotal(c);
+      const workersArr = (c.workers || []) as ContainerWorker[];
+
+      const workOrderId = c.workOrderId ? String(c.workOrderId) : "";
+      const workOrder = workOrderId ? workOrderMap.get(workOrderId) : undefined;
+      const workOrderName = workOrder?.name ?? "";
 
       for (const w of workersArr) {
-        const workerName = w.workerName || "Unknown Worker";
-        const minutesWorked = w.minutesWorked || 0;
-        const percentContribution = w.percentContribution || 0;
-        const payoutAmount = w.payoutAmount || 0;
+        const workerName = getWorkerName(w);
+        const minutesWorked = getWorkerMinutes(w);
+        const percentContribution = getWorkerPercent(w);
+        const payoutAmount = getWorkerPayout(w);
 
         rows.push({
           date,
           building,
           shift,
+          workOrderId,
+          workOrderName,
           containerNo,
           workerName,
           minutesWorked,
@@ -279,28 +452,31 @@ export default function ReportsPage() {
 
     rows.sort((a, b) => {
       if (a.date === b.date) {
-        return a.containerNo.localeCompare(b.containerNo);
+        if (a.workOrderName === b.workOrderName) {
+          return a.containerNo.localeCompare(b.containerNo);
+        }
+        return (a.workOrderName || "").localeCompare(b.workOrderName || "");
       }
       return a.date.localeCompare(b.date);
     });
 
     return rows;
-  }, [filteredContainers]);
+  }, [filteredContainers, workOrderMap]);
 
   // 2) Shift Performance rows
   const shiftRows: ShiftPerfRow[] = useMemo(() => {
     const map = new Map<string, ShiftPerfRow>();
 
     for (const c of filteredContainers) {
-      const date = parseDateOnly(c.date ?? null) || "";
-      const building = c.building || "";
-      const shift = c.shift || "";
+      const date = getContainerDate(c) || "";
+      const building = getContainerBuilding(c);
+      const shift = getContainerShift(c);
       const key = `${date}|${building}|${shift}`;
 
-      const pieces = c.pieces_total || 0;
+      const pieces = getPiecesTotal(c);
       const workersArr = (c.workers || []) as ContainerWorker[];
       const minutes = workersArr.reduce(
-        (sum, w) => sum + (w.minutesWorked || 0),
+        (sum, w) => sum + getWorkerMinutes(w),
         0
       );
 
@@ -324,9 +500,7 @@ export default function ReportsPage() {
 
     for (const row of map.values()) {
       row.pph =
-        row.minutesTotal === 0
-          ? 0
-          : (row.piecesTotal * 60) / row.minutesTotal;
+        row.minutesTotal === 0 ? 0 : (row.piecesTotal * 60) / row.minutesTotal;
     }
 
     return Array.from(map.values()).sort((a, b) =>
@@ -334,7 +508,7 @@ export default function ReportsPage() {
     );
   }, [filteredContainers]);
 
-  // 3) Staffing Coverage view rows
+  // 3) Staffing view
   const staffingRows: StaffingViewRow[] = useMemo(() => {
     const rows: StaffingViewRow[] = [];
 
@@ -388,14 +562,14 @@ export default function ReportsPage() {
     >();
 
     for (const c of filteredContainers) {
-      const building = c.building || "";
-      const pieces = c.pieces_total || 0;
-      const workersArr = c.workers || [];
+      const building = getContainerBuilding(c);
+      const pieces = getPiecesTotal(c);
+      const workersArr = (c.workers || []) as ContainerWorker[];
 
       const uniqueContainerWorkers = new Set<string>();
 
       for (const w of workersArr) {
-        const workerName = (w.workerName || "Unknown Worker").trim();
+        const workerName = getWorkerName(w).trim();
         if (!workerName) continue;
 
         const key = workerName.toLowerCase();
@@ -414,8 +588,8 @@ export default function ReportsPage() {
         const entry = map.get(key)!;
         if (building) entry.buildings.add(building);
 
-        const minutes = w.minutesWorked || 0;
-        const payout = w.payoutAmount || 0;
+        const minutes = getWorkerMinutes(w);
+        const payout = getWorkerPayout(w);
 
         entry.totalPayout += payout;
         entry.totalMinutes += minutes;
@@ -465,6 +639,7 @@ export default function ReportsPage() {
       "Date",
       "Building",
       "Shift",
+      "Work Order",
       "Container #",
       "Worker",
       "Minutes Worked",
@@ -478,6 +653,7 @@ export default function ReportsPage() {
       r.date,
       r.building,
       r.shift,
+      r.workOrderName || r.workOrderId || "",
       r.containerNo,
       r.workerName,
       r.minutesWorked,
@@ -588,7 +764,7 @@ export default function ReportsPage() {
             </p>
             {loading && (
               <p className="mt-1 text-[11px] text-slate-500">
-                Loading Supabase data…
+                Loading Supabase staffing data…
               </p>
             )}
             {error && (
@@ -670,7 +846,8 @@ export default function ReportsPage() {
                   Production Pay Report
                 </h2>
                 <p className="text-[11px] text-slate-500">
-                  Per worker, per container payout with pieces and SKUs.
+                  Per worker, per container payout with pieces, SKUs, and work
+                  order number.
                 </p>
               </div>
               <button
@@ -693,6 +870,7 @@ export default function ReportsPage() {
                       <th className="px-3 py-2">Date</th>
                       <th className="px-3 py-2">Bldg</th>
                       <th className="px-3 py-2">Shift</th>
+                      <th className="px-3 py-2">Work Order</th>
                       <th className="px-3 py-2">Container</th>
                       <th className="px-3 py-2">Worker</th>
                       <th className="px-3 py-2 text-right">Minutes</th>
@@ -705,12 +883,15 @@ export default function ReportsPage() {
                   <tbody>
                     {productionRows.map((r, idx) => (
                       <tr
-                        key={`${r.date}-${r.containerNo}-${r.workerName}-${idx}`}
+                        key={`${r.date}-${r.workOrderId}-${r.containerNo}-${r.workerName}-${idx}`}
                         className="border-b border-slate-800/60 hover:bg-slate-900/60"
                       >
                         <td className="px-3 py-1.5">{r.date}</td>
                         <td className="px-3 py-1.5">{r.building}</td>
                         <td className="px-3 py-1.5">{r.shift}</td>
+                        <td className="px-3 py-1.5">
+                          {r.workOrderName || r.workOrderId || "—"}
+                        </td>
                         <td className="px-3 py-1.5 font-mono text-[11px]">
                           {r.containerNo}
                         </td>
