@@ -1,22 +1,30 @@
 // src/app/layout.tsx
+import { ServiceWorkerRegister } from "./sw-register";
 import type { Metadata } from "next";
 import "./globals.css";
 
-export const metadata: Metadata = {
+export const metadata = {
   title: "Precision Pulse",
-  description: "3PL Operations Platform for Precision Lumping Services",
+  description: "Precision Lumping Services – Production & Workforce OS",
+  manifest: "/manifest.webmanifest",
+};
+
+export const viewport = {
+  themeColor: "#020617",
 };
 
 export default function RootLayout({
   children,
-}: Readonly<{
+}: {
   children: React.ReactNode;
-}>) {
+}) {
   return (
     <html lang="en">
-      <body className="min-h-screen bg-slate-950 text-slate-50">
+      <body>
+        <ServiceWorkerRegister />
         {children}
       </body>
     </html>
   );
 }
+
