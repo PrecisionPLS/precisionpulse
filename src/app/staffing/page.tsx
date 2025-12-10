@@ -62,6 +62,9 @@ function rowToPlan(row: StaffingRow): StaffingPlan {
 
 export default function StaffingPage() {
   const currentUser = useCurrentUser();
+  const isSuperAdmin = currentUser?.accessRole === "Super Admin";
+  const isLead = currentUser?.accessRole === "Lead";
+  const leadBuilding = currentUser?.building || "";
 
   const [plans, setPlans] = useState<StaffingPlan[]>([]);
   const [workforceSummary, setWorkforceSummary] = useState<WorkforceSummary[]>(
@@ -94,7 +97,8 @@ export default function StaffingPage() {
   function resetForm() {
     setEditingId(null);
     setDate(new Date().toISOString().slice(0, 10));
-    setBuilding("DC18");
+    // For leads, force their building; others default to DC18 / last value
+    setBuilding(leadBuilding || "DC18");
     setShift("1st");
     setRequiredTotal("0");
     setRequiredLumpers("0");
@@ -106,12 +110,19 @@ export default function StaffingPage() {
   async function loadStaffingPlans() {
     setError(null);
     try {
-      const { data, error } = await supabase
+      let query = supabase
         .from("staffing_plans")
         .select("*")
         .order("date", { ascending: true })
         .order("building", { ascending: true })
         .order("shift", { ascending: true });
+
+      // Leads only see staffing plans for their building
+      if (isLead && leadBuilding) {
+        query = query.eq("building", leadBuilding);
+      }
+
+      const { data, error } = await query;
 
       if (error) {
         console.error("Error loading staffing plans", error);
@@ -130,9 +141,16 @@ export default function StaffingPage() {
   async function loadWorkforceSummary() {
     setError(null);
     try {
-      const { data, error } = await supabase
+      let query = supabase
         .from("workforce")
         .select("id, building, status");
+
+      // Leads only see workforce counts for their own building
+      if (isLead && leadBuilding) {
+        query = query.eq("building", leadBuilding);
+      }
+
+      const { data, error } = await query;
 
       if (error) {
         console.error("Error loading workforce for staffing", error);
@@ -174,6 +192,15 @@ export default function StaffingPage() {
     refreshAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentUser]);
+
+  // Once we know this user is a Lead, force building + filter to their DC
+  useEffect(() => {
+    if (!currentUser) return;
+    if (isLead && leadBuilding) {
+      setBuilding((prev) => prev || leadBuilding);
+      setFilterBuilding(leadBuilding);
+    }
+  }, [currentUser, isLead, leadBuilding]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -442,12 +469,17 @@ export default function StaffingPage() {
                     className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
                     value={building}
                     onChange={(e) => setBuilding(e.target.value)}
+                    disabled={isLead && !!leadBuilding}
                   >
-                    {BUILDINGS.map((b) => (
-                      <option key={b} value={b}>
-                        {b}
-                      </option>
-                    ))}
+                    {BUILDINGS.map((b) => {
+                      if (isLead && leadBuilding && b !== leadBuilding)
+                        return null;
+                      return (
+                        <option key={b} value={b}>
+                          {b}
+                        </option>
+                      );
+                    })}
                   </select>
                 </div>
               </div>
@@ -487,9 +519,7 @@ export default function StaffingPage() {
                   <input
                     className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
                     value={requiredLumpers}
-                    onChange={(e) =>
-                      setRequiredLumpers(e.target.value)
-                    }
+                    onChange={(e) => setRequiredLumpers(e.target.value)}
                   />
                 </div>
               </div>
@@ -502,9 +532,7 @@ export default function StaffingPage() {
                   <input
                     className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
                     value={requiredEquipment}
-                    onChange={(e) =>
-                      setRequiredEquipment(e.target.value)
-                    }
+                    onChange={(e) => setRequiredEquipment(e.target.value)}
                   />
                 </div>
                 <div>
@@ -557,10 +585,11 @@ export default function StaffingPage() {
                 <button
                   type="button"
                   onClick={() => {
-                    setFilterBuilding("ALL");
                     setFilterShift("ALL");
                     setFilterDateFrom("");
                     setFilterDateTo("");
+                    // Only reset building filter to ALL for non-Leads
+                    setFilterBuilding(isLead && leadBuilding ? leadBuilding : "ALL");
                   }}
                   className="text-[11px] text-sky-300 hover:underline"
                 >
@@ -576,16 +605,19 @@ export default function StaffingPage() {
                   <select
                     className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
                     value={filterBuilding}
-                    onChange={(e) =>
-                      setFilterBuilding(e.target.value)
-                    }
+                    onChange={(e) => setFilterBuilding(e.target.value)}
+                    disabled={isLead && !!leadBuilding}
                   >
-                    <option value="ALL">All Buildings</option>
-                    {BUILDINGS.map((b) => (
-                      <option key={b} value={b}>
-                        {b}
-                      </option>
-                    ))}
+                    {!isLead && <option value="ALL">All Buildings</option>}
+                    {BUILDINGS.map((b) => {
+                      if (isLead && leadBuilding && b !== leadBuilding)
+                        return null;
+                      return (
+                        <option key={b} value={b}>
+                          {b}
+                        </option>
+                      );
+                    })}
                   </select>
                 </div>
                 <div>
@@ -613,9 +645,7 @@ export default function StaffingPage() {
                     type="date"
                     className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
                     value={filterDateFrom}
-                    onChange={(e) =>
-                      setFilterDateFrom(e.target.value)
-                    }
+                    onChange={(e) => setFilterDateFrom(e.target.value)}
                   />
                 </div>
                 <div>

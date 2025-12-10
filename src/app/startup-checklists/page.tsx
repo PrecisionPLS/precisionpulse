@@ -87,6 +87,9 @@ function rowToStartup(row: StartupRow): StartupChecklist {
 
 export default function StartupChecklistsPage() {
   const currentUser = useCurrentUser();
+  const isSuperAdmin = currentUser?.accessRole === "Super Admin";
+  const isLead = currentUser?.accessRole === "Lead";
+  const leadBuilding = currentUser?.building || "";
 
   const [records, setRecords] = useState<StartupChecklist[]>([]);
 
@@ -127,16 +130,16 @@ export default function StartupChecklistsPage() {
 
     try {
       let query = supabase
-  .from("containers")
-  .select("*")
-  .order("created_at", { ascending: false });
+        .from("startup_checklists")
+        .select("*")
+        .order("created_at", { ascending: false });
 
-// If this user is a Lead, only show containers for their building
-if (currentUser?.accessRole === "Lead" && currentUser.building) {
-  query = query.eq("building", currentUser.building);
-}
+      // If this user is a Lead, only show startup checklists for their building
+      if (isLead && leadBuilding) {
+        query = query.eq("building", leadBuilding);
+      }
 
-const { data, error } = await query;
+      const { data, error } = await query;
 
       if (error) {
         console.error("Error loading startup checklists", error);
@@ -159,6 +162,15 @@ const { data, error } = await query;
     if (!currentUser) return;
     refreshFromSupabase();
   }, [currentUser]);
+
+  // Once user + role known, lock building + filters for Leads
+  useEffect(() => {
+    if (!currentUser) return;
+    if (isLead && leadBuilding) {
+      setBuilding((prev) => prev || leadBuilding);
+      setFilterBuilding(leadBuilding);
+    }
+  }, [currentUser, isLead, leadBuilding]);
 
   const summary = useMemo(() => {
     const total = records.length;
@@ -329,6 +341,8 @@ const { data, error } = await query;
     );
   }
 
+  const buildingList = isLead && leadBuilding ? [leadBuilding] : BUILDINGS;
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-950 to-slate-900 text-slate-50">
       <div className="mx-auto max-w-6xl p-6 space-y-6">
@@ -397,8 +411,8 @@ const { data, error } = await query;
             Building Startup Overview
           </h2>
           <div className="grid grid-cols-1 md:grid-cols-5 gap-3 text-xs">
-            {BUILDINGS.map((b) => {
-              const stats = buildingStats[b];
+            {buildingList.map((b) => {
+              const stats = buildingStats[b] || { total: 0, completed: 0 };
               const rate =
                 stats.total === 0
                   ? 0
@@ -465,12 +479,17 @@ const { data, error } = await query;
                     className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2 text-sm text-slate-50"
                     value={building}
                     onChange={(e) => setBuilding(e.target.value)}
+                    disabled={isLead && !!leadBuilding}
                   >
-                    {BUILDINGS.map((b) => (
-                      <option key={b} value={b}>
-                        {b}
-                      </option>
-                    ))}
+                    {BUILDINGS.map((b) => {
+                      if (isLead && leadBuilding && b !== leadBuilding)
+                        return null;
+                      return (
+                        <option key={b} value={b}>
+                          {b}
+                        </option>
+                      );
+                    })}
                   </select>
                 </div>
                 <div>
@@ -530,13 +549,18 @@ const { data, error } = await query;
                   className="rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-slate-50"
                   value={filterBuilding}
                   onChange={(e) => setFilterBuilding(e.target.value)}
+                  disabled={isLead && !!leadBuilding}
                 >
-                  <option value="ALL">All Buildings</option>
-                  {BUILDINGS.map((b) => (
-                    <option key={b} value={b}>
-                      {b}
-                    </option>
-                  ))}
+                  {!isLead && <option value="ALL">All Buildings</option>}
+                  {BUILDINGS.map((b) => {
+                    if (isLead && leadBuilding && b !== leadBuilding)
+                      return null;
+                    return (
+                      <option key={b} value={b}>
+                        {b}
+                      </option>
+                    );
+                  })}
                 </select>
                 <select
                   className="rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-slate-50"
@@ -563,6 +587,19 @@ const { data, error } = await query;
                   <option value="In Progress">In Progress</option>
                   <option value="Completed">Completed</option>
                 </select>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFilterShift("ALL");
+                    setFilterStatus("ALL");
+                    setFilterBuilding(
+                      isLead && leadBuilding ? leadBuilding : "ALL"
+                    );
+                  }}
+                  className="text-[11px] text-sky-300 hover:underline"
+                >
+                  Reset
+                </button>
               </div>
             </div>
 

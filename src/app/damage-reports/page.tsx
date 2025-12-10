@@ -54,6 +54,9 @@ function rowToDamageReport(row: DamageReportRow): DamageReport {
 
 export default function DamageReportsPage() {
   const currentUser = useCurrentUser();
+  const isSuperAdmin = currentUser?.accessRole === "Super Admin";
+  const isLead = currentUser?.accessRole === "Lead";
+  const leadBuilding = currentUser?.building || "";
 
   const [reports, setReports] = useState<DamageReport[]>([]);
 
@@ -90,16 +93,16 @@ export default function DamageReportsPage() {
     setError(null);
     try {
       let query = supabase
-  .from("containers")
-  .select("*")
-  .order("created_at", { ascending: false });
+        .from("damage_reports")
+        .select("*")
+        .order("created_at", { ascending: false });
 
-// If this user is a Lead, only show containers for their building
-if (currentUser?.accessRole === "Lead" && currentUser.building) {
-  query = query.eq("building", currentUser.building);
-}
+      // If this user is a Lead, only show damage reports for their building
+      if (isLead && leadBuilding) {
+        query = query.eq("building", leadBuilding);
+      }
 
-const { data, error } = await query;
+      const { data, error } = await query;
 
       if (error) {
         console.error("Error loading damage reports", error);
@@ -123,9 +126,18 @@ const { data, error } = await query;
     refreshFromSupabase();
   }, [currentUser]);
 
+  // Once we know user + role, lock form/building + filters for Leads
+  useEffect(() => {
+    if (!currentUser) return;
+    if (isLead && leadBuilding) {
+      setBuilding((prev) => prev || leadBuilding);
+      setFilterBuilding(leadBuilding);
+    }
+  }, [currentUser, isLead, leadBuilding]);
+
   function resetForm() {
     setEditingId(null);
-    setBuilding(currentUser?.building || "DC18");
+    setBuilding(leadBuilding || "DC18");
     setShift("1st");
     setContainerNo("");
     setPiecesTotal("");
@@ -344,7 +356,9 @@ const { data, error } = await query;
               {totalReports}
             </div>
             <div className="text-[11px] text-slate-500 mt-1">
-              Across all buildings
+              {isLead && leadBuilding
+                ? `For ${leadBuilding}`
+                : "Across all buildings"}
             </div>
           </div>
           <div className="rounded-2xl bg-slate-900 border border-slate-800 p-4">
@@ -403,12 +417,17 @@ const { data, error } = await query;
                     className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
                     value={building}
                     onChange={(e) => setBuilding(e.target.value)}
+                    disabled={isLead && !!leadBuilding}
                   >
-                    {BUILDINGS.map((b) => (
-                      <option key={b} value={b}>
-                        {b}
-                      </option>
-                    ))}
+                    {BUILDINGS.map((b) => {
+                      if (isLead && leadBuilding && b !== leadBuilding)
+                        return null;
+                      return (
+                        <option key={b} value={b}>
+                          {b}
+                        </option>
+                      );
+                    })}
                   </select>
                 </div>
                 <div>
@@ -539,9 +558,11 @@ const { data, error } = await query;
                 <button
                   type="button"
                   onClick={() => {
-                    setFilterBuilding("ALL");
                     setFilterStatus("ALL");
                     setSearch("");
+                    setFilterBuilding(
+                      isLead && leadBuilding ? leadBuilding : "ALL"
+                    );
                   }}
                   className="text-[11px] text-sky-300 hover:underline"
                 >
@@ -557,16 +578,19 @@ const { data, error } = await query;
                   <select
                     className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
                     value={filterBuilding}
-                    onChange={(e) =>
-                      setFilterBuilding(e.target.value)
-                    }
+                    onChange={(e) => setFilterBuilding(e.target.value)}
+                    disabled={isLead && !!leadBuilding}
                   >
-                    <option value="ALL">All Buildings</option>
-                    {BUILDINGS.map((b) => (
-                      <option key={b} value={b}>
-                        {b}
-                      </option>
-                    ))}
+                    {!isLead && <option value="ALL">All Buildings</option>}
+                    {BUILDINGS.map((b) => {
+                      if (isLead && leadBuilding && b !== leadBuilding)
+                        return null;
+                      return (
+                        <option key={b} value={b}>
+                          {b}
+                        </option>
+                      );
+                    })}
                   </select>
                 </div>
                 <div>
@@ -576,9 +600,7 @@ const { data, error } = await query;
                   <select
                     className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
                     value={filterStatus}
-                    onChange={(e) =>
-                      setFilterStatus(e.target.value)
-                    }
+                    onChange={(e) => setFilterStatus(e.target.value)}
                   >
                     <option value="ALL">All Statuses</option>
                     {STATUS_OPTIONS.map((s) => (

@@ -51,6 +51,9 @@ function rowToChat(row: ChatRow): ChatMessage {
 
 export default function ChatsPage() {
   const currentUser = useCurrentUser();
+  const isSuperAdmin = currentUser?.accessRole === "Super Admin";
+  const isLead = currentUser?.accessRole === "Lead";
+  const leadBuilding = currentUser?.building || "";
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
 
@@ -84,16 +87,16 @@ export default function ChatsPage() {
 
     try {
       let query = supabase
-  .from("containers")
-  .select("*")
-  .order("created_at", { ascending: false });
+        .from("chats")
+        .select("*")
+        .order("created_at", { ascending: true });
 
-// If this user is a Lead, only show containers for their building
-if (currentUser?.accessRole === "Lead" && currentUser.building) {
-  query = query.eq("building", currentUser.building);
-}
+      // If this user is a Lead, only show chats for their building
+      if (isLead && leadBuilding) {
+        query = query.eq("building", leadBuilding);
+      }
 
-const { data, error } = await query;
+      const { data, error } = await query;
 
       if (error) {
         console.error("Error loading chats", error);
@@ -117,8 +120,22 @@ const { data, error } = await query;
     refreshFromSupabase();
   }, [currentUser]);
 
+  // Once we know user + role, lock building/filters for Leads
+  useEffect(() => {
+    if (!currentUser) return;
+    if (isLead && leadBuilding) {
+      setBuilding((prev) => prev || leadBuilding);
+      setFilterBuilding(leadBuilding);
+    }
+  }, [currentUser, isLead, leadBuilding]);
+
   const filteredMessages = useMemo(() => {
     return messages.filter((m) => {
+      // Hard safety: Leads never see other buildings, even if somehow loaded
+      if (isLead && leadBuilding && m.building !== leadBuilding) {
+        return false;
+      }
+
       if (filterBuilding !== "ALL" && m.building !== filterBuilding) {
         return false;
       }
@@ -130,10 +147,14 @@ const { data, error } = await query;
       }
       return true;
     });
-  }, [messages, filterBuilding, filterShift, filterChannel]);
+  }, [messages, filterBuilding, filterShift, filterChannel, isLead, leadBuilding]);
 
+  const effectiveFilterBuilding =
+    isLead && leadBuilding ? leadBuilding : filterBuilding;
   const buildingLabel =
-    filterBuilding === "ALL" ? "All Buildings" : filterBuilding;
+    effectiveFilterBuilding === "ALL"
+      ? "All Buildings"
+      : effectiveFilterBuilding;
 
   const todayStr = new Date().toISOString().slice(0, 10);
   const todayCount = filteredMessages.filter((m) =>
@@ -152,7 +173,7 @@ const { data, error } = await query;
 
     try {
       const payload = {
-        building,
+        building: isLead && leadBuilding ? leadBuilding : building,
         shift,
         channel,
         message: trimmed,
@@ -180,7 +201,7 @@ const { data, error } = await query;
   }
 
   async function handleDelete(id: string) {
-    if (!currentUser || currentUser.accessRole !== "Super Admin") {
+    if (!currentUser || !isSuperAdmin) {
       // Extra safety on the client side
       return;
     }
@@ -225,8 +246,6 @@ const { data, error } = await query;
       </div>
     );
   }
-
-  const isSuperAdmin = currentUser.accessRole === "Super Admin";
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-950 to-slate-900 text-slate-50">
@@ -320,14 +339,18 @@ const { data, error } = await query;
                   </label>
                   <select
                     className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
-                    value={building}
+                    value={isLead && leadBuilding ? leadBuilding : building}
                     onChange={(e) => setBuilding(e.target.value)}
+                    disabled={isLead && !!leadBuilding}
                   >
-                    {BUILDINGS.map((b) => (
-                      <option key={b} value={b}>
-                        {b}
-                      </option>
-                    ))}
+                    {BUILDINGS.map((b) => {
+                      if (isLead && leadBuilding && b !== leadBuilding) return null;
+                      return (
+                        <option key={b} value={b}>
+                          {b}
+                        </option>
+                      );
+                    })}
                   </select>
                 </div>
                 <div>
@@ -407,15 +430,19 @@ const { data, error } = await query;
               <div className="flex flex-wrap gap-2">
                 <select
                   className="rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-slate-50"
-                  value={filterBuilding}
+                  value={isLead && leadBuilding ? leadBuilding : filterBuilding}
                   onChange={(e) => setFilterBuilding(e.target.value)}
+                  disabled={isLead && !!leadBuilding}
                 >
-                  <option value="ALL">All Buildings</option>
-                  {BUILDINGS.map((b) => (
-                    <option key={b} value={b}>
-                      {b}
-                    </option>
-                  ))}
+                  {!isLead && <option value="ALL">All Buildings</option>}
+                  {BUILDINGS.map((b) => {
+                    if (isLead && leadBuilding && b !== leadBuilding) return null;
+                    return (
+                      <option key={b} value={b}>
+                        {b}
+                      </option>
+                    );
+                  })}
                 </select>
                 <select
                   className="rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-slate-50"
@@ -444,9 +471,9 @@ const { data, error } = await query;
                 <button
                   type="button"
                   onClick={() => {
-                    setFilterBuilding("ALL");
                     setFilterShift("ALL");
                     setFilterChannel("ALL");
+                    setFilterBuilding(isLead && leadBuilding ? leadBuilding : "ALL");
                   }}
                   className="text-[11px] text-sky-300 hover:underline"
                 >

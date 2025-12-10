@@ -62,7 +62,14 @@ export default function ContainersPage() {
   const currentUser = useCurrentUser();
   const router = useRouter();
 
-  const [buildingFilter, setBuildingFilter] = useState<string>("ALL");
+  // Role + building info
+  const isLead = currentUser?.accessRole === "Lead";
+  const leadBuilding = currentUser?.building || "";
+
+  // Filters & UI state
+  const [buildingFilter, setBuildingFilter] = useState<string>(() =>
+    isLead && leadBuilding ? leadBuilding : "ALL"
+  );
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -72,7 +79,7 @@ export default function ContainersPage() {
 
   const [showForm, setShowForm] = useState(false);
   const [formState, setFormState] = useState<EditFormState>({
-    building: "DC18",
+    building: currentUser?.building || "DC18",
     containerNo: "",
     piecesTotal: 0,
     skusTotal: 0,
@@ -85,6 +92,13 @@ export default function ContainersPage() {
     ],
   });
 
+  // If user changes (or their building changes), keep the filter locked for Leads
+  useEffect(() => {
+    if (isLead && leadBuilding && buildingFilter !== leadBuilding) {
+      setBuildingFilter(leadBuilding);
+    }
+  }, [isLead, leadBuilding, buildingFilter]);
+
   // Load containers from Supabase and sync to localStorage
   useEffect(() => {
     if (!currentUser) return;
@@ -94,16 +108,16 @@ export default function ContainersPage() {
       setError(null);
       try {
         let query = supabase
-  .from("containers")
-  .select("*")
-  .order("created_at", { ascending: false });
+          .from("containers")
+          .select("*")
+          .order("created_at", { ascending: false });
 
-// If this user is a Lead, only show containers for their building
-if (currentUser?.accessRole === "Lead" && currentUser.building) {
-  query = query.eq("building", currentUser.building);
-}
+        // If this user is a Lead, only show containers for their building
+        if (isLead && leadBuilding) {
+          query = query.eq("building", leadBuilding);
+        }
 
-const { data, error } = await query;
+        const { data, error } = await query;
 
         if (error) {
           console.error("Error loading containers", error);
@@ -151,7 +165,7 @@ const { data, error } = await query;
     }
 
     loadContainers();
-  }, [currentUser]);
+  }, [currentUser, isLead, leadBuilding]);
 
   // Load work orders for the Work Order dropdown (only once we know user)
   useEffect(() => {
@@ -181,7 +195,10 @@ const { data, error } = await query;
 
         setWorkOrders(opts);
       } catch (e) {
-        console.error("Unexpected error loading work orders for container form", e);
+        console.error(
+          "Unexpected error loading work orders for container form",
+          e
+        );
       }
     }
 
@@ -189,9 +206,21 @@ const { data, error } = await query;
   }, [currentUser]);
 
   const filteredContainers = useMemo(() => {
-    if (buildingFilter === "ALL") return containers;
-    return containers.filter((c) => c.building === buildingFilter);
-  }, [containers, buildingFilter]);
+    let rows = [...containers];
+
+    // Hard lock for Leads — they only ever see their building’s containers
+    if (isLead && leadBuilding) {
+      rows = rows.filter((c) => c.building === leadBuilding);
+      return rows;
+    }
+
+    // Non-Leads can use the building filter (including "ALL")
+    if (buildingFilter !== "ALL") {
+      rows = rows.filter((c) => c.building === buildingFilter);
+    }
+
+    return rows;
+  }, [containers, buildingFilter, isLead, leadBuilding]);
 
   const totalPieces = useMemo(
     () =>
@@ -238,14 +267,16 @@ const { data, error } = await query;
       piecesTotal: row.pieces_total,
       skusTotal: row.skus_total,
       workOrderId: row.work_order_id ?? null,
-      workers: (row.workers || []).concat(
-        Array(Math.max(0, 4 - (row.workers?.length || 0))).fill({
-          name: "",
-          minutesWorked: 0,
-          percentContribution: 0,
-          payout: 0,
-        })
-      ).slice(0, 4),
+      workers: (row.workers || [])
+        .concat(
+          Array(Math.max(0, 4 - (row.workers?.length || 0))).fill({
+            name: "",
+            minutesWorked: 0,
+            percentContribution: 0,
+            payout: 0,
+          })
+        )
+        .slice(0, 4),
     });
     setShowForm(true);
   }
@@ -325,8 +356,12 @@ const { data, error } = await query;
     setSaving(true);
 
     try {
+      // Force building for Leads
+      const effectiveBuilding =
+        isLead && leadBuilding ? leadBuilding : formState.building;
+
       const payload: any = {
-        building: formState.building,
+        building: effectiveBuilding,
         container_no: formState.containerNo.trim(),
         pieces_total: formState.piecesTotal,
         skus_total: formState.skusTotal,
@@ -358,10 +393,16 @@ const { data, error } = await query;
       }
 
       // Reload from Supabase and sync localStorage
-      const { data, error: loadError } = await supabase
+      let reloadQuery = supabase
         .from("containers")
         .select("*")
         .order("created_at", { ascending: false });
+
+      if (isLead && leadBuilding) {
+        reloadQuery = reloadQuery.eq("building", leadBuilding);
+      }
+
+      const { data, error: loadError } = await reloadQuery;
 
       if (loadError) {
         console.error("Error reloading containers", loadError);
@@ -452,7 +493,7 @@ const { data, error } = await query;
     }
   }
 
-  // Protect route AFTER hooks
+  // Protect route AFTER all hooks
   if (!currentUser) {
     return (
       <div className="min-h-screen bg-slate-950 text-slate-400 flex flex-col items-center justify-center text-sm gap-2">
@@ -510,13 +551,19 @@ const { data, error } = await query;
               className="rounded-lg bg-slate-900 border border-slate-700 px-3 py-1.5 text-xs text-slate-50"
               value={buildingFilter}
               onChange={(e) => setBuildingFilter(e.target.value)}
+              disabled={isLead && !!leadBuilding}
             >
-              <option value="ALL">All Buildings</option>
-              {BUILDINGS.map((b) => (
-                <option key={b} value={b}>
-                  {b}
-                </option>
-              ))}
+              {/* Non-Leads can see "All Buildings" */}
+              {!isLead && <option value="ALL">All Buildings</option>}
+              {BUILDINGS.map((b) => {
+                // Leads only see their own building option
+                if (isLead && leadBuilding && b !== leadBuilding) return null;
+                return (
+                  <option key={b} value={b}>
+                    {b}
+                  </option>
+                );
+              })}
             </select>
           </div>
           <div className="flex flex-wrap gap-4">
@@ -685,12 +732,17 @@ const { data, error } = await query;
                           workOrderId: null,
                         }))
                       }
+                      disabled={isLead && !!leadBuilding}
                     >
-                      {BUILDINGS.map((b) => (
-                        <option key={b} value={b}>
-                          {b}
-                        </option>
-                      ))}
+                      {BUILDINGS.map((b) => {
+                        if (isLead && leadBuilding && b !== leadBuilding)
+                          return null;
+                        return (
+                          <option key={b} value={b}>
+                            {b}
+                          </option>
+                        );
+                      })}
                     </select>
                   </div>
                   <div>

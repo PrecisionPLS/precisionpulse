@@ -70,6 +70,9 @@ function defaultChecklist(): Record<string, boolean> {
 
 export default function TerminationsPage() {
   const currentUser = useCurrentUser();
+  const isSuperAdmin = currentUser?.accessRole === "Super Admin";
+  const isLead = currentUser?.accessRole === "Lead";
+  const leadBuilding = currentUser?.building || "";
 
   const [records, setRecords] = useState<TerminationRecord[]>([]);
 
@@ -107,10 +110,17 @@ export default function TerminationsPage() {
     setError(null);
 
     try {
-      const { data, error } = await supabase
+      let query = supabase
         .from("terminations")
         .select("*")
         .order("created_at", { ascending: false });
+
+      // Leads only see terminations for their own building
+      if (isLead && leadBuilding) {
+        query = query.eq("building", leadBuilding);
+      }
+
+      const { data, error } = await query;
 
       if (error) {
         console.error("Error loading terminations", error);
@@ -134,11 +144,20 @@ export default function TerminationsPage() {
     refreshFromSupabase();
   }, [currentUser]);
 
+  // Once we know user is a Lead, force their building for form + filters
+  useEffect(() => {
+    if (!currentUser) return;
+    if (isLead && leadBuilding) {
+      setBuilding((prev) => prev || leadBuilding);
+      setFilterBuilding(leadBuilding);
+    }
+  }, [currentUser, isLead, leadBuilding]);
+
   function resetForm() {
     setEditingId(null);
     setEmployeeName("");
     setRole("");
-    setBuilding(currentUser?.building || "DC18");
+    setBuilding(leadBuilding || "DC18");
     setReason("");
     setStatus("In Progress");
     setChecklist(defaultChecklist());
@@ -290,7 +309,7 @@ export default function TerminationsPage() {
     return rows;
   }, [records, filterBuilding, filterStatus, search]);
 
-  // Summary metrics (these also feed nicely into your dashboard thinking)
+  // Summary metrics
   const totalTerminations = records.length;
   const completedCount = records.filter(
     (r) => r.status === "Completed"
@@ -342,7 +361,9 @@ export default function TerminationsPage() {
               {totalTerminations}
             </div>
             <div className="text-[11px] text-slate-500 mt-1">
-              Across all buildings
+              {isLead && leadBuilding
+                ? `For ${leadBuilding}`
+                : "Across all buildings"}
             </div>
           </div>
           <div className="rounded-2xl bg-slate-900 border border-slate-800 p-4">
@@ -425,12 +446,17 @@ export default function TerminationsPage() {
                     className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
                     value={building}
                     onChange={(e) => setBuilding(e.target.value)}
+                    disabled={isLead && !!leadBuilding}
                   >
-                    {BUILDINGS.map((b) => (
-                      <option key={b} value={b}>
-                        {b}
-                      </option>
-                    ))}
+                    {BUILDINGS.map((b) => {
+                      if (isLead && leadBuilding && b !== leadBuilding)
+                        return null;
+                      return (
+                        <option key={b} value={b}>
+                          {b}
+                        </option>
+                      );
+                    })}
                   </select>
                 </div>
                 <div>
@@ -555,9 +581,11 @@ export default function TerminationsPage() {
                 <button
                   type="button"
                   onClick={() => {
-                    setFilterBuilding("ALL");
                     setFilterStatus("ALL");
                     setSearch("");
+                    setFilterBuilding(
+                      isLead && leadBuilding ? leadBuilding : "ALL"
+                    );
                   }}
                   className="text-[11px] text-sky-300 hover:underline"
                 >
@@ -573,16 +601,19 @@ export default function TerminationsPage() {
                   <select
                     className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
                     value={filterBuilding}
-                    onChange={(e) =>
-                      setFilterBuilding(e.target.value)
-                    }
+                    onChange={(e) => setFilterBuilding(e.target.value)}
+                    disabled={isLead && !!leadBuilding}
                   >
-                    <option value="ALL">All Buildings</option>
-                    {BUILDINGS.map((b) => (
-                      <option key={b} value={b}>
-                        {b}
-                      </option>
-                    ))}
+                    {!isLead && <option value="ALL">All Buildings</option>}
+                    {BUILDINGS.map((b) => {
+                      if (isLead && leadBuilding && b !== leadBuilding)
+                        return null;
+                      return (
+                        <option key={b} value={b}>
+                          {b}
+                        </option>
+                      );
+                    })}
                   </select>
                 </div>
                 <div>
@@ -592,9 +623,7 @@ export default function TerminationsPage() {
                   <select
                     className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
                     value={filterStatus}
-                    onChange={(e) =>
-                      setFilterStatus(e.target.value)
-                    }
+                    onChange={(e) => setFilterStatus(e.target.value)}
                   >
                     <option value="ALL">All Statuses</option>
                     {STATUS_OPTIONS.map((s) => (

@@ -147,6 +147,9 @@ function downloadCsv(filename: string, header: string[], rows: (string | number)
 export default function ReportsPage() {
   const currentUser = useCurrentUser(); // redirect handled inside
 
+  const isLead = currentUser?.accessRole === "Lead";
+  const leadBuilding = currentUser?.building || "";
+
   const [containers, setContainers] = useState<ContainerRow[]>([]);
   const [staffing, setStaffing] = useState<StaffingRow[]>([]);
 
@@ -164,11 +167,17 @@ export default function ReportsPage() {
       setLoading(true);
       setError(null);
       try {
-        // IMPORTANT CHANGE: select("*") instead of listing columns
-        const [contRes, staffRes] = await Promise.all([
-          supabase.from("containers").select("*"),
-          supabase.from("staffing_plans").select("*"),
-        ]);
+        // Base queries
+        let contQuery = supabase.from("containers").select("*");
+        let staffQuery = supabase.from("staffing_plans").select("*");
+
+        // If Lead, limit to their building server-side
+        if (isLead && leadBuilding) {
+          contQuery = contQuery.eq("building", leadBuilding);
+          staffQuery = staffQuery.eq("building", leadBuilding);
+        }
+
+        const [contRes, staffRes] = await Promise.all([contQuery, staffQuery]);
 
         if (contRes.error) {
           console.error("Error loading containers for reports", contRes.error);
@@ -196,11 +205,21 @@ export default function ReportsPage() {
     }
 
     load();
-  }, [currentUser]);
+  }, [currentUser, isLead, leadBuilding]);
+
+  // When user is a Lead, lock building filter to their building
+  useEffect(() => {
+    if (isLead && leadBuilding) {
+      setBuildingFilter(leadBuilding);
+    }
+  }, [isLead, leadBuilding]);
+
+  const effectiveBuildingFilter =
+    isLead && leadBuilding ? leadBuilding : buildingFilter;
 
   function matchesBuilding(b: string | null | undefined): boolean {
-    if (buildingFilter === "ALL") return true;
-    return (b || "") === buildingFilter;
+    if (effectiveBuildingFilter === "ALL") return true;
+    return (b || "") === effectiveBuildingFilter;
   }
 
   // Filtered containers and staffing based on building + date range
@@ -210,7 +229,7 @@ export default function ReportsPage() {
         matchesBuilding(c.building ?? null) &&
         isWithinRange(parseDateOnly(c.date), dateRange)
     );
-  }, [containers, buildingFilter, dateRange]);
+  }, [containers, effectiveBuildingFilter, dateRange]);
 
   const filteredStaffing = useMemo(() => {
     return staffing.filter(
@@ -218,7 +237,7 @@ export default function ReportsPage() {
         matchesBuilding(s.building ?? null) &&
         isWithinRange(parseDateOnly(s.date), dateRange)
     );
-  }, [staffing, buildingFilter, dateRange]);
+  }, [staffing, effectiveBuildingFilter, dateRange]);
 
   // 1) Production Pay Report rows
   const productionRows: ProductionPayRow[] = useMemo(() => {
@@ -467,9 +486,9 @@ export default function ReportsPage() {
       r.skusTotal,
     ]);
     const label =
-      buildingFilter === "ALL"
+      effectiveBuildingFilter === "ALL"
         ? "all-buildings"
-        : buildingFilter.toLowerCase();
+        : effectiveBuildingFilter.toLowerCase();
     downloadCsv(
       `production-pay-${label}-${dateRange.replace(/\s+/g, "-").toLowerCase()}.csv`,
       header,
@@ -497,9 +516,9 @@ export default function ReportsPage() {
       r.pph.toFixed(1),
     ]);
     const label =
-      buildingFilter === "ALL"
+      effectiveBuildingFilter === "ALL"
         ? "all-buildings"
-        : buildingFilter.toLowerCase();
+        : effectiveBuildingFilter.toLowerCase();
     downloadCsv(
       `shift-performance-${label}-${dateRange.replace(/\s+/g, "-").toLowerCase()}.csv`,
       header,
@@ -527,9 +546,9 @@ export default function ReportsPage() {
       r.status,
     ]);
     const label =
-      buildingFilter === "ALL"
+      effectiveBuildingFilter === "ALL"
         ? "all-buildings"
-        : buildingFilter.toLowerCase();
+        : effectiveBuildingFilter.toLowerCase();
     downloadCsv(
       `staffing-coverage-${label}-${dateRange.replace(/\s+/g, "-").toLowerCase()}.csv`,
       header,
@@ -546,7 +565,7 @@ export default function ReportsPage() {
   }
 
   const buildingLabel =
-    buildingFilter === "ALL" ? "All Buildings" : buildingFilter;
+    effectiveBuildingFilter === "ALL" ? "All Buildings" : effectiveBuildingFilter;
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-950 to-slate-900 text-slate-50">
@@ -578,14 +597,19 @@ export default function ReportsPage() {
             <div className="flex flex-wrap gap-2">
               <select
                 className="rounded-lg bg-slate-900 border border-slate-700 px-3 py-1.5 text-slate-50"
-                value={buildingFilter}
+                value={effectiveBuildingFilter}
                 onChange={(e) => setBuildingFilter(e.target.value)}
+                disabled={isLead && !!leadBuilding}
               >
-                {BUILDINGS.map((b) => (
-                  <option key={b} value={b}>
-                    {b === "ALL" ? "All Buildings" : b}
-                  </option>
-                ))}
+                {isLead && leadBuilding ? (
+                  <option value={leadBuilding}>{leadBuilding}</option>
+                ) : (
+                  BUILDINGS.map((b) => (
+                    <option key={b} value={b}>
+                      {b === "ALL" ? "All Buildings" : b}
+                    </option>
+                  ))
+                )}
               </select>
               <select
                 className="rounded-lg bg-slate-900 border border-slate-700 px-3 py-1.5 text-slate-50"
@@ -670,7 +694,7 @@ export default function ReportsPage() {
                       <th className="px-3 py-2">Container</th>
                       <th className="px-3 py-2">Worker</th>
                       <th className="px-3 py-2 text-right">Minutes</th>
-                      <th className="px-3 py-2 text-right">%</th>
+                      <th className="px-3 py-2 text-right">% </th>
                       <th className="px-3 py-2 text-right">Payout</th>
                       <th className="px-3 py-2 text-right">Pay Total</th>
                       <th className="px-3 py-2 text-right">Pieces</th>
@@ -723,13 +747,13 @@ export default function ReportsPage() {
                   PPH by building, shift, and date from container volume.
                 </p>
               </div>
-              <button
-                type="button"
-                onClick={handleDownloadShiftCsv}
-                className="text-[11px] px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-950 hover:bg-slate-800 text-slate-200"
-              >
-                Download CSV
-              </button>
+            <button
+              type="button"
+              onClick={handleDownloadShiftCsv}
+              className="text-[11px] px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-950 hover:bg-slate-800 text-slate-200"
+            >
+              Download CSV
+            </button>
             </div>
             <div className="overflow-auto border border-slate-800 rounded-xl flex-1">
               {shiftRows.length === 0 ? (
@@ -816,7 +840,7 @@ export default function ReportsPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {staffingRows.map((r, idx) => (
+                    {staffingRows.length === 0 ? null : staffingRows.map((r, idx) => (
                       <tr
                         key={`${r.date}-${r.building}-${r.shift}-${idx}`}
                         className="border-b border-slate-800/60 hover:bg-slate-900/60"

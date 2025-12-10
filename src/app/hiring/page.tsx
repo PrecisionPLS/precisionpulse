@@ -1,8 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, FormEvent } from "react";
 import { supabase } from "@/lib/supabaseClient";
+import { useCurrentUser } from "@/lib/useCurrentUser";
 
 const BUILDINGS = ["DC1", "DC5", "DC11", "DC14", "DC18"];
 
@@ -29,6 +30,11 @@ type CandidateRow = {
 };
 
 export default function HiringPage() {
+  const currentUser = useCurrentUser();
+
+  const isLead = currentUser?.accessRole === "Lead";
+  const leadBuilding = currentUser?.building || "";
+
   const [candidates, setCandidates] = useState<CandidateRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -47,57 +53,74 @@ export default function HiringPage() {
   const [filterStage, setFilterStage] = useState<string>("ALL");
   const [search, setSearch] = useState("");
 
-  // Load from Supabase once
+  // Load from Supabase once user is known
   useEffect(() => {
-    refreshFromSupabase();
-  }, []);
+    if (!currentUser) return;
 
-  async function refreshFromSupabase() {
-    setLoading(true);
-    setError(null);
-    try {
-      const { data, error } = await supabase
-        .from("hiring_pipeline")
-        .select("*")
-        .order("created_at", { ascending: false });
+    async function refreshFromSupabase() {
+      setLoading(true);
+      setError(null);
+      try {
+        let query = supabase
+          .from("hiring_pipeline")
+          .select("*")
+          .order("created_at", { ascending: false });
 
-      if (error) {
-        console.error("Error loading hiring pipeline", error);
-        setError("Failed to load hiring pipeline from Supabase.");
+        // If Lead, only see their building
+        if (isLead && leadBuilding) {
+          query = query.eq("building", leadBuilding);
+        }
+
+        const { data, error } = await query;
+
+        if (error) {
+          console.error("Error loading hiring pipeline", error);
+          setError("Failed to load hiring pipeline from Supabase.");
+          setCandidates([]);
+        } else {
+          setCandidates((data || []) as CandidateRow[]);
+        }
+      } catch (e) {
+        console.error("Unexpected error loading hiring pipeline", e);
+        setError("Unexpected error loading hiring pipeline.");
         setCandidates([]);
-      } else {
-        setCandidates((data || []) as CandidateRow[]);
+      } finally {
+        setLoading(false);
       }
-    } catch (e) {
-      console.error("Unexpected error loading hiring pipeline", e);
-      setError("Unexpected error loading hiring pipeline.");
-      setCandidates([]);
-    } finally {
-      setLoading(false);
     }
-  }
+
+    refreshFromSupabase();
+  }, [currentUser, isLead, leadBuilding]);
+
+  // Lock building for leads (form + filters)
+  useEffect(() => {
+    if (isLead && leadBuilding) {
+      setBuilding(leadBuilding);
+      setFilterBuilding(leadBuilding);
+    }
+  }, [isLead, leadBuilding]);
 
   function resetForm() {
     setEditingId(null);
     setName("");
     setPhone("");
-    setBuilding("DC18");
     setStage("Applied");
     setSource("");
     setNotes("");
+    setBuilding(isLead && leadBuilding ? leadBuilding : "DC18");
   }
 
   function startEdit(c: CandidateRow) {
     setEditingId(c.id);
     setName(c.name || "");
     setPhone(c.phone || "");
-    setBuilding(c.building || "DC18");
+    setBuilding(c.building || (isLead && leadBuilding ? leadBuilding : "DC18"));
     setStage((c.stage as CandidateStage) || "Applied");
     setSource(c.source || "");
     setNotes(c.notes || "");
   }
 
-  async function handleSubmit(e: React.FormEvent) {
+  async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     setError(null);
 
@@ -106,6 +129,8 @@ export default function HiringPage() {
       return;
     }
 
+    const effectiveBuilding = isLead && leadBuilding ? leadBuilding : building;
+
     try {
       if (editingId) {
         const { error } = await supabase
@@ -113,7 +138,7 @@ export default function HiringPage() {
           .update({
             name: name.trim(),
             phone: phone.trim() || null,
-            building,
+            building: effectiveBuilding,
             stage,
             source: source.trim() || null,
             notes: notes.trim() || null,
@@ -129,7 +154,7 @@ export default function HiringPage() {
         const { error } = await supabase.from("hiring_pipeline").insert({
           name: name.trim(),
           phone: phone.trim() || null,
-          building,
+          building: effectiveBuilding,
           stage,
           source: source.trim() || null,
           notes: notes.trim() || null,
@@ -143,7 +168,28 @@ export default function HiringPage() {
       }
 
       resetForm();
-      await refreshFromSupabase();
+      // Reload list
+      try {
+        let query = supabase
+          .from("hiring_pipeline")
+          .select("*")
+          .order("created_at", { ascending: false });
+
+        if (isLead && leadBuilding) {
+          query = query.eq("building", leadBuilding);
+        }
+
+        const { data, error } = await query;
+
+        if (error) {
+          console.error("Error reloading hiring pipeline", error);
+          setError("Failed to reload hiring pipeline after save.");
+        } else {
+          setCandidates((data || []) as CandidateRow[]);
+        }
+      } catch (err) {
+        console.error("Unexpected error reloading after save", err);
+      }
     } catch (e) {
       console.error("Unexpected error saving candidate", e);
       setError("Unexpected error while saving candidate.");
@@ -174,7 +220,28 @@ export default function HiringPage() {
         resetForm();
       }
 
-      await refreshFromSupabase();
+      // Reload list
+      try {
+        let query = supabase
+          .from("hiring_pipeline")
+          .select("*")
+          .order("created_at", { ascending: false });
+
+        if (isLead && leadBuilding) {
+          query = query.eq("building", leadBuilding);
+        }
+
+        const { data, error } = await query;
+
+        if (error) {
+          console.error("Error reloading hiring pipeline", error);
+          setError("Failed to reload hiring pipeline after delete.");
+        } else {
+          setCandidates((data || []) as CandidateRow[]);
+        }
+      } catch (err) {
+        console.error("Unexpected error reloading after delete", err);
+      }
     } catch (e) {
       console.error("Unexpected error deleting candidate", e);
       setError("Unexpected error while deleting candidate.");
@@ -194,18 +261,42 @@ export default function HiringPage() {
         return;
       }
 
-      await refreshFromSupabase();
+      // Reload list
+      try {
+        let query = supabase
+          .from("hiring_pipeline")
+          .select("*")
+          .order("created_at", { ascending: false });
+
+        if (isLead && leadBuilding) {
+          query = query.eq("building", leadBuilding);
+        }
+
+        const { data, error } = await query;
+
+        if (error) {
+          console.error("Error reloading hiring pipeline", error);
+          setError("Failed to reload hiring pipeline after move.");
+        } else {
+          setCandidates((data || []) as CandidateRow[]);
+        }
+      } catch (err) {
+        console.error("Unexpected error reloading after move", err);
+      }
     } catch (e) {
       console.error("Unexpected error moving candidate", e);
       setError("Unexpected error while moving candidate.");
     }
   }
 
+  const effectiveFilterBuilding =
+    isLead && leadBuilding ? leadBuilding : filterBuilding;
+
   const filteredCandidates = useMemo(() => {
     let rows = [...candidates];
 
-    if (filterBuilding !== "ALL") {
-      rows = rows.filter((c) => c.building === filterBuilding);
+    if (effectiveFilterBuilding !== "ALL") {
+      rows = rows.filter((c) => (c.building || "") === effectiveFilterBuilding);
     }
     if (filterStage !== "ALL") {
       rows = rows.filter((c) => (c.stage || "Applied") === filterStage);
@@ -223,11 +314,26 @@ export default function HiringPage() {
     }
 
     return rows;
-  }, [candidates, filterBuilding, filterStage, search]);
+  }, [candidates, effectiveFilterBuilding, filterStage, search]);
 
   function candidatesInStage(stage: CandidateStage) {
     return filteredCandidates.filter(
       (c) => (c.stage as CandidateStage) === stage
+    );
+  }
+
+  // Route protection
+  if (!currentUser) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-400 flex flex-col items-center justify-center text-sm gap-2">
+        <div>Redirecting to login…</div>
+        <a
+          href="/auth"
+          className="text-sky-400 text-xs underline hover:text-sky-300"
+        >
+          Click here if you are not redirected.
+        </a>
+      </div>
     );
   }
 
@@ -317,12 +423,17 @@ export default function HiringPage() {
                     className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
                     value={building}
                     onChange={(e) => setBuilding(e.target.value)}
+                    disabled={isLead && !!leadBuilding}
                   >
-                    {BUILDINGS.map((b) => (
-                      <option key={b} value={b}>
-                        {b}
-                      </option>
-                    ))}
+                    {isLead && leadBuilding ? (
+                      <option value={leadBuilding}>{leadBuilding}</option>
+                    ) : (
+                      BUILDINGS.map((b) => (
+                        <option key={b} value={b}>
+                          {b}
+                        </option>
+                      ))
+                    )}
                   </select>
                 </div>
               </div>
@@ -381,7 +492,7 @@ export default function HiringPage() {
             </form>
           </div>
 
-          {/* Filters + summary */}
+          {/* Filters + board */}
           <div className="lg:col-span-2 space-y-4">
             <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 text-xs">
               <div className="flex items-center justify-between mb-3">
@@ -396,7 +507,9 @@ export default function HiringPage() {
                 <button
                   type="button"
                   onClick={() => {
-                    setFilterBuilding("ALL");
+                    if (!isLead || !leadBuilding) {
+                      setFilterBuilding("ALL");
+                    }
                     setFilterStage("ALL");
                     setSearch("");
                   }}
@@ -413,17 +526,22 @@ export default function HiringPage() {
                   </label>
                   <select
                     className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
-                    value={filterBuilding}
-                    onChange={(e) =>
-                      setFilterBuilding(e.target.value)
-                    }
+                    value={effectiveFilterBuilding}
+                    onChange={(e) => setFilterBuilding(e.target.value)}
+                    disabled={isLead && !!leadBuilding}
                   >
-                    <option value="ALL">All Buildings</option>
-                    {BUILDINGS.map((b) => (
-                      <option key={b} value={b}>
-                        {b}
-                      </option>
-                    ))}
+                    {isLead && leadBuilding ? (
+                      <option value={leadBuilding}>{leadBuilding}</option>
+                    ) : (
+                      <>
+                        <option value="ALL">All Buildings</option>
+                        {BUILDINGS.map((b) => (
+                          <option key={b} value={b}>
+                            {b}
+                          </option>
+                        ))}
+                      </>
+                    )}
                   </select>
                 </div>
                 <div>
@@ -433,9 +551,7 @@ export default function HiringPage() {
                   <select
                     className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
                     value={filterStage}
-                    onChange={(e) =>
-                      setFilterStage(e.target.value)
-                    }
+                    onChange={(e) => setFilterStage(e.target.value)}
                   >
                     <option value="ALL">All Stages</option>
                     {STAGES.map((s) => (
@@ -519,9 +635,7 @@ export default function HiringPage() {
                                 </button>
                                 <button
                                   type="button"
-                                  onClick={() =>
-                                    handleDelete(c.id)
-                                  }
+                                  onClick={() => handleDelete(c.id)}
                                   className="text-[10px] text-rose-300 hover:underline"
                                 >
                                   Delete

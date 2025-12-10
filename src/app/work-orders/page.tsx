@@ -43,8 +43,7 @@ function mapRowToRecord(row: WorkOrderRow): WorkOrderRecord {
   const id = String(row.id);
   const createdAt = row.created_at ?? new Date().toISOString();
   const name =
-    row.work_order_code ??
-    row.status + " Work Order " + id.slice(-4);
+    row.work_order_code ?? row.status + " Work Order " + id.slice(-4);
 
   return {
     id,
@@ -78,6 +77,10 @@ export default function WorkOrdersPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Role-based info
+  const isLead = currentUser?.accessRole === "Lead";
+  const leadBuilding = currentUser?.building || "";
+
   function persistWorkOrders(next: WorkOrderRecord[]) {
     setWorkOrders(next);
     if (typeof window !== "undefined") {
@@ -97,17 +100,18 @@ export default function WorkOrdersPage() {
     setLoading(true);
     setError(null);
     try {
+      // ✅ Correct table & role-based query
       let query = supabase
-  .from("containers")
-  .select("*")
-  .order("created_at", { ascending: false });
+        .from("work_orders")
+        .select("*")
+        .order("created_at", { ascending: false });
 
-// If this user is a Lead, only show containers for their building
-if (currentUser?.accessRole === "Lead" && currentUser.building) {
-  query = query.eq("building", currentUser.building);
-}
+      // Leads only see work orders for their building
+      if (isLead && leadBuilding) {
+        query = query.eq("building", leadBuilding);
+      }
 
-const { data, error } = await query;
+      const { data, error } = await query;
 
       if (error) {
         console.error("Error loading work orders", error);
@@ -130,7 +134,15 @@ const { data, error } = await query;
   useEffect(() => {
     if (!currentUser) return;
     refreshWorkOrders();
-  }, [currentUser]);
+  }, [currentUser, isLead, leadBuilding]);
+
+  // When we know they're a lead, lock default building + filters
+  useEffect(() => {
+    if (isLead && leadBuilding) {
+      setFilterBuilding((prev) => (prev === "ALL" ? leadBuilding : prev));
+      setBuilding((prev) => (prev === "DC1" ? leadBuilding : prev));
+    }
+  }, [isLead, leadBuilding]);
 
   // Load containers from localStorage for "containers per work order" counts
   useEffect(() => {
@@ -229,8 +241,12 @@ const { data, error } = await query;
     setError(null);
 
     try {
+      // Force building for Leads
+      const effectiveBuilding =
+        isLead && leadBuilding ? leadBuilding : building;
+
       const payload = {
-        building,
+        building: effectiveBuilding,
         shift_name: shift,
         work_order_code: name.trim(),
         status,
@@ -270,6 +286,10 @@ const { data, error } = await query;
   const displayedOrders = useMemo(() => {
     return workOrders
       .filter((wo) => {
+        // Extra safety: Leads only see their building even in-memory
+        if (isLead && leadBuilding && wo.building !== leadBuilding) {
+          return false;
+        }
         if (filterBuilding !== "ALL" && wo.building !== filterBuilding) {
           return false;
         }
@@ -279,7 +299,7 @@ const { data, error } = await query;
         return true;
       })
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  }, [workOrders, filterBuilding, filterStatus]);
+  }, [workOrders, filterBuilding, filterStatus, isLead, leadBuilding]);
 
   function containersForOrder(orderId: string): ContainerRecord[] {
     return containers.filter((c) => c.workOrderId === orderId);
@@ -367,12 +387,18 @@ const { data, error } = await query;
                     className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
                     value={building}
                     onChange={(e) => setBuilding(e.target.value)}
+                    disabled={isLead && !!leadBuilding}
                   >
-                    {BUILDINGS.map((b) => (
-                      <option key={b} value={b}>
-                        {b}
-                      </option>
-                    ))}
+                    {BUILDINGS.map((b) => {
+                      if (isLead && leadBuilding && b !== leadBuilding) {
+                        return null;
+                      }
+                      return (
+                        <option key={b} value={b}>
+                          {b}
+                        </option>
+                      );
+                    })}
                   </select>
                 </div>
                 <div>
@@ -452,8 +478,13 @@ const { data, error } = await query;
                 <button
                   type="button"
                   onClick={() => {
-                    setFilterBuilding("ALL");
+                    // Reset filters, but keep lead locked to their building
                     setFilterStatus("ALL");
+                    if (!isLead) {
+                      setFilterBuilding("ALL");
+                    } else if (isLead && leadBuilding) {
+                      setFilterBuilding(leadBuilding);
+                    }
                   }}
                   className="text-[11px] text-sky-300 hover:underline"
                 >
@@ -470,13 +501,19 @@ const { data, error } = await query;
                     className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
                     value={filterBuilding}
                     onChange={(e) => setFilterBuilding(e.target.value)}
+                    disabled={isLead && !!leadBuilding}
                   >
-                    <option value="ALL">All Buildings</option>
-                    {BUILDINGS.map((b) => (
-                      <option key={b} value={b}>
-                        {b}
-                      </option>
-                    ))}
+                    {!isLead && <option value="ALL">All Buildings</option>}
+                    {BUILDINGS.map((b) => {
+                      if (isLead && leadBuilding && b !== leadBuilding) {
+                        return null;
+                      }
+                      return (
+                        <option key={b} value={b}>
+                          {b}
+                        </option>
+                      );
+                    })}
                   </select>
                 </div>
                 <div>

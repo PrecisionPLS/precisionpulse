@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, FormEvent } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { useCurrentUser } from "@/lib/useCurrentUser";
 
@@ -76,6 +76,8 @@ function rowToRecord(row: TrainingRow): TrainingRecord {
 
 export default function TrainingPage() {
   const currentUser = useCurrentUser();
+  const isLead = currentUser?.accessRole === "Lead";
+  const leadBuilding = currentUser?.building || "";
 
   const [records, setRecords] = useState<TrainingRecord[]>([]);
   const [loading, setLoading] = useState(true);
@@ -102,7 +104,7 @@ export default function TrainingPage() {
 
   function resetForm() {
     setEditingId(null);
-    setBuilding("DC18");
+    setBuilding(isLead && leadBuilding ? leadBuilding : "DC18");
     setRole("Lumper");
     setModuleName("");
     setRequired(true);
@@ -120,10 +122,17 @@ export default function TrainingPage() {
     setInfo(null);
 
     try {
-      const { data, error } = await supabase
+      let query = supabase
         .from("training_records")
         .select("*")
         .order("created_at", { ascending: false });
+
+      // Lead: only their building
+      if (isLead && leadBuilding) {
+        query = query.eq("building", leadBuilding);
+      }
+
+      const { data, error } = await query;
 
       if (error) {
         console.error("Error loading training records", error);
@@ -146,9 +155,17 @@ export default function TrainingPage() {
     if (!currentUser) return;
     loadTraining();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentUser]);
+  }, [currentUser, isLead, leadBuilding]);
 
-  async function handleSubmit(e: React.FormEvent) {
+  // When user is a Lead, lock form + filters to their building
+  useEffect(() => {
+    if (isLead && leadBuilding) {
+      setBuilding(leadBuilding);
+      setFilterBuilding(leadBuilding);
+    }
+  }, [isLead, leadBuilding]);
+
+  async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     setError(null);
     setInfo(null);
@@ -158,13 +175,15 @@ export default function TrainingPage() {
       return;
     }
 
+    const effectiveBuilding = isLead && leadBuilding ? leadBuilding : building;
+
     try {
       if (editingId) {
         // UPDATE
         const { error } = await supabase
           .from("training_records")
           .update({
-            building,
+            building: effectiveBuilding,
             role,
             module_name: moduleName.trim(),
             required,
@@ -189,7 +208,7 @@ export default function TrainingPage() {
       } else {
         // INSERT
         const { error } = await supabase.from("training_records").insert({
-          building,
+          building: effectiveBuilding,
           role,
           module_name: moduleName.trim(),
           required,
@@ -251,7 +270,7 @@ export default function TrainingPage() {
 
   function handleEdit(rec: TrainingRecord) {
     setEditingId(rec.id);
-    setBuilding(rec.building);
+    setBuilding(isLead && leadBuilding ? leadBuilding : rec.building);
     setRole(rec.role);
     setModuleName(rec.moduleName);
     setRequired(rec.required);
@@ -261,11 +280,14 @@ export default function TrainingPage() {
     setNotes(rec.notes ?? "");
   }
 
+  const effectiveFilterBuilding =
+    isLead && leadBuilding ? leadBuilding : filterBuilding;
+
   const filteredRecords = useMemo(() => {
     let rows = [...records];
 
-    if (filterBuilding !== "ALL") {
-      rows = rows.filter((r) => r.building === filterBuilding);
+    if (effectiveFilterBuilding !== "ALL") {
+      rows = rows.filter((r) => r.building === effectiveFilterBuilding);
     }
     if (filterRole !== "ALL") {
       rows = rows.filter((r) => r.role === filterRole);
@@ -284,7 +306,7 @@ export default function TrainingPage() {
     }
 
     return rows;
-  }, [records, filterBuilding, filterRole, filterStatus, search]);
+  }, [records, effectiveFilterBuilding, filterRole, filterStatus, search]);
 
   const summary = useMemo(() => {
     const total = records.length;
@@ -426,12 +448,17 @@ export default function TrainingPage() {
                     className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
                     value={building}
                     onChange={(e) => setBuilding(e.target.value)}
+                    disabled={isLead && !!leadBuilding}
                   >
-                    {BUILDINGS.map((b) => (
-                      <option key={b} value={b}>
-                        {b}
-                      </option>
-                    ))}
+                    {isLead && leadBuilding ? (
+                      <option value={leadBuilding}>{leadBuilding}</option>
+                    ) : (
+                      BUILDINGS.map((b) => (
+                        <option key={b} value={b}>
+                          {b}
+                        </option>
+                      ))
+                    )}
                   </select>
                 </div>
                 <div>
@@ -546,7 +573,9 @@ export default function TrainingPage() {
                 <button
                   type="button"
                   onClick={() => {
-                    setFilterBuilding("ALL");
+                    if (!isLead || !leadBuilding) {
+                      setFilterBuilding("ALL");
+                    }
                     setFilterRole("ALL");
                     setFilterStatus("ALL");
                     setSearch("");
@@ -564,15 +593,22 @@ export default function TrainingPage() {
                   </label>
                   <select
                     className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
-                    value={filterBuilding}
+                    value={effectiveFilterBuilding}
                     onChange={(e) => setFilterBuilding(e.target.value)}
+                    disabled={isLead && !!leadBuilding}
                   >
-                    <option value="ALL">All Buildings</option>
-                    {BUILDINGS.map((b) => (
-                      <option key={b} value={b}>
-                        {b}
-                      </option>
-                    ))}
+                    {isLead && leadBuilding ? (
+                      <option value={leadBuilding}>{leadBuilding}</option>
+                    ) : (
+                      <>
+                        <option value="ALL">All Buildings</option>
+                        {BUILDINGS.map((b) => (
+                          <option key={b} value={b}>
+                            {b}
+                          </option>
+                        ))}
+                      </>
+                    )}
                   </select>
                 </div>
                 <div>

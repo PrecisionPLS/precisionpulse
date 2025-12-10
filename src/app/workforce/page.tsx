@@ -107,6 +107,10 @@ export default function WorkforcePage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Role-based info
+  const isLead = currentUser?.accessRole === "Lead";
+  const leadBuilding = currentUser?.building || "";
+
   // Persist into localStorage so dashboard/reports keep working
   function persist(next: WorkforcePerson[]) {
     setPeople(next);
@@ -120,10 +124,17 @@ export default function WorkforcePage() {
     setLoading(true);
     setError(null);
     try {
-      const { data, error } = await supabase
+      let query = supabase
         .from("workforce")
         .select("*")
         .order("name", { ascending: true });
+
+      // 🔒 Leads only see workers in their own building
+      if (isLead && leadBuilding) {
+        query = query.eq("building", leadBuilding);
+      }
+
+      const { data, error } = await query;
 
       if (error) {
         console.error("Error loading workforce", error);
@@ -146,7 +157,15 @@ export default function WorkforcePage() {
   useEffect(() => {
     if (!currentUser) return;
     refreshFromSupabase();
-  }, [currentUser]);
+  }, [currentUser, isLead, leadBuilding]);
+
+  // When we know they're a lead, lock building defaults + filters
+  useEffect(() => {
+    if (isLead && leadBuilding) {
+      setBuilding((prev) => (prev === "DC18" ? leadBuilding : prev));
+      setFilterBuilding((prev) => (prev === "ALL" ? leadBuilding : prev));
+    }
+  }, [isLead, leadBuilding]);
 
   // Form helpers
   function resetForm() {
@@ -234,11 +253,15 @@ export default function WorkforcePage() {
     setError(null);
 
     try {
+      // 🔒 Force building for Leads (even if someone tampers with the UI)
+      const effectiveBuilding =
+        isLead && leadBuilding ? leadBuilding : building;
+
       const payload = {
         name: name.trim(),
         job_role: role.trim() || null,
         access_role: accessRole || null,
-        building,
+        building: effectiveBuilding,
         status,
         rate_type: rateType || null,
         rate_value: parsedRate,
@@ -278,6 +301,11 @@ export default function WorkforcePage() {
   const displayedPeople = useMemo(() => {
     let rows = [...people];
 
+    // Extra safety: Leads can only ever see their own building in-memory
+    if (isLead && leadBuilding) {
+      rows = rows.filter((p) => p.building === leadBuilding);
+    }
+
     if (filterBuilding !== "ALL") {
       rows = rows.filter((p) => p.building === filterBuilding);
     }
@@ -296,7 +324,7 @@ export default function WorkforcePage() {
 
     rows.sort((a, b) => a.name.localeCompare(b.name));
     return rows;
-  }, [people, filterBuilding, filterStatus, search]);
+  }, [people, filterBuilding, filterStatus, search, isLead, leadBuilding]);
 
   const totalActive = people.filter((p) => p.status === "Active").length;
   const totalSuperAdmins = people.filter(
@@ -469,12 +497,18 @@ export default function WorkforcePage() {
                     className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
                     value={building}
                     onChange={(e) => setBuilding(e.target.value)}
+                    disabled={isLead && !!leadBuilding}
                   >
-                    {BUILDINGS.map((b) => (
-                      <option key={b} value={b}>
-                        {b}
-                      </option>
-                    ))}
+                    {BUILDINGS.map((b) => {
+                      if (isLead && leadBuilding && b !== leadBuilding) {
+                        return null;
+                      }
+                      return (
+                        <option key={b} value={b}>
+                          {b}
+                        </option>
+                      );
+                    })}
                   </select>
                 </div>
                 <div>
@@ -570,9 +604,13 @@ export default function WorkforcePage() {
                 <button
                   type="button"
                   onClick={() => {
-                    setFilterBuilding("ALL");
                     setFilterStatus("ALL");
                     setSearch("");
+                    if (!isLead) {
+                      setFilterBuilding("ALL");
+                    } else if (isLead && leadBuilding) {
+                      setFilterBuilding(leadBuilding);
+                    }
                   }}
                   className="text-[11px] text-sky-300 hover:underline"
                 >
@@ -591,13 +629,19 @@ export default function WorkforcePage() {
                     onChange={(e) =>
                       setFilterBuilding(e.target.value)
                     }
+                    disabled={isLead && !!leadBuilding}
                   >
-                    <option value="ALL">All Buildings</option>
-                    {BUILDINGS.map((b) => (
-                      <option key={b} value={b}>
-                        {b}
-                      </option>
-                    ))}
+                    {!isLead && <option value="ALL">All Buildings</option>}
+                    {BUILDINGS.map((b) => {
+                      if (isLead && leadBuilding && b !== leadBuilding) {
+                        return null;
+                      }
+                      return (
+                        <option key={b} value={b}>
+                          {b}
+                        </option>
+                      );
+                    })}
                   </select>
                 </div>
                 <div>

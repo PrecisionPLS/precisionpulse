@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
+import { useCurrentUser } from "@/lib/useCurrentUser";
 
 const CONTAINER_STORAGE_KEY = "precisionpulse_containers";
 const WORKORDER_STORAGE_KEY = "precisionpulse_workorders";
@@ -35,11 +36,23 @@ const BUILDINGS = ["DC1", "DC5", "DC11", "DC14", "DC18"];
 const SHIFTS = ["1st", "2nd", "3rd", "4th"];
 
 export default function ShiftsPage() {
+  const currentUser = useCurrentUser();
+  const isSuperAdmin = currentUser?.accessRole === "Super Admin";
+  const isLead = currentUser?.accessRole === "Lead";
+  const leadBuilding = currentUser?.building || "";
+
   const [containers, setContainers] = useState<SavedContainer[]>([]);
   const [workOrders, setWorkOrders] = useState<WorkOrder[]>([]);
 
   const [selectedBuilding, setSelectedBuilding] = useState(BUILDINGS[0]);
   const [selectedShift, setSelectedShift] = useState(SHIFTS[0]);
+
+  // Once we know the user is a Lead, force their building selection
+  useEffect(() => {
+    if (isLead && leadBuilding && selectedBuilding !== leadBuilding) {
+      setSelectedBuilding(leadBuilding);
+    }
+  }, [isLead, leadBuilding, selectedBuilding]);
 
   // Load data from localStorage
   useEffect(() => {
@@ -103,25 +116,41 @@ export default function ShiftsPage() {
     };
   }, [filteredContainers]);
 
+  // Protect route AFTER hooks
+  if (!currentUser) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-400 flex flex-col items-center justify-center text-sm gap-2">
+        <div>Redirecting to login…</div>
+        <a
+          href="/auth"
+          className="text-sky-400 text-xs underline hover:text-sky-300"
+        >
+          Click here if you are not redirected.
+        </a>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
+      {/* Header */}
       <div className="flex items-center justify-between gap-4">
-  <div>
-    <h1 className="text-2xl font-semibold text-slate-50">
-      Shifts Overview
-    </h1>
-    <p className="text-sm text-slate-400">
-      View production and payout by building and shift, based on work
-      orders and container assignments.
-    </p>
-  </div>
-  <Link
-    href="/"
-    className="text-xs px-3 py-1 rounded-full border border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800"
-  >
-    ← Back to Dashboard
-  </Link>
-</div>
+        <div>
+          <h1 className="text-2xl font-semibold text-slate-50">
+            Shifts Overview
+          </h1>
+          <p className="text-sm text-slate-400">
+            View production and payout by building and shift, based on work
+            orders and container assignments.
+          </p>
+        </div>
+        <Link
+          href="/"
+          className="text-xs px-3 py-1 rounded-full border border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800"
+        >
+          ← Back to Dashboard
+        </Link>
+      </div>
 
       {/* Filters + summary */}
       <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4">
@@ -134,12 +163,17 @@ export default function ShiftsPage() {
               className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2 text-sm text-slate-50"
               value={selectedBuilding}
               onChange={(e) => setSelectedBuilding(e.target.value)}
+              disabled={isLead && !!leadBuilding}
             >
-              {BUILDINGS.map((b) => (
-                <option key={b} value={b}>
-                  {b}
-                </option>
-              ))}
+              {BUILDINGS.map((b) => {
+                // Leads only see THEIR building in the dropdown
+                if (isLead && leadBuilding && b !== leadBuilding) return null;
+                return (
+                  <option key={b} value={b}>
+                    {b}
+                  </option>
+                );
+              })}
             </select>
           </div>
 
