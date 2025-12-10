@@ -4,11 +4,11 @@ import Link from "next/link";
 import { useEffect, useMemo, useState, FormEvent } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { useCurrentUser } from "@/lib/useCurrentUser";
+import { BUILDINGS } from "@/lib/buildings"; // ✅ shared buildings
 
 const WORK_ORDERS_KEY = "precisionpulse_work_orders";
 const CONTAINERS_KEY = "precisionpulse_containers";
 
-const BUILDINGS = ["DC1", "DC5", "DC11", "DC14", "DC18"];
 const SHIFTS = ["1st", "2nd", "3rd", "4th"];
 const STATUS_OPTIONS = ["Pending", "Active", "Completed", "Locked"];
 

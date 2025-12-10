@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useCurrentUser } from "@/lib/useCurrentUser";
+import { BUILDINGS } from "@/lib/buildings";
 
 const WORKFORCE_KEY = "precisionpulse_workforce";
 const TERMINATIONS_KEY = "precisionpulse_terminations";
@@ -13,9 +14,6 @@ const STARTUP_KEY = "precisionpulse_startup_checklists";
 const CHATS_KEY = "precisionpulse_chats";
 const CONTAINERS_KEY = "precisionpulse_containers";
 const WORK_ORDERS_KEY = "precisionpulse_work_orders";
-
-// NOTE: BUILDINGS includes "ALL" but we handle that in the dropdown
-const BUILDINGS = ["ALL", "DC1", "DC5", "DC11", "DC14", "DC18"];
 
 type ContainerWorker = {
   minutesWorked?: number;
@@ -456,7 +454,7 @@ export default function Page() {
                   {/* Only HQ/Admin/Super Admin can see All Buildings */}
                   {isHQ && <option value="ALL">All Buildings</option>}
 
-                  {BUILDINGS.filter((b) => b !== "ALL").map((b) => {
+                  {BUILDINGS.map((b) => {
                     // Non-HQ: only show their own building in the list
                     if (!isHQ && userBuilding && b !== userBuilding) {
                       return null;

@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { useCurrentUser } from "@/lib/useCurrentUser";
+import { BUILDINGS } from "@/lib/buildings"; // ✅ shared buildings
 
 const CONTAINER_STORAGE_KEY = "precisionpulse_containers";
 const WORKORDER_STORAGE_KEY = "precisionpulse_workorders";
@@ -32,7 +33,6 @@ type WorkOrder = {
   createdAt: string;
 };
 
-const BUILDINGS = ["DC1", "DC5", "DC11", "DC14", "DC18"];
 const SHIFTS = ["1st", "2nd", "3rd", "4th"];
 
 export default function ShiftsPage() {
@@ -44,7 +44,9 @@ export default function ShiftsPage() {
   const [containers, setContainers] = useState<SavedContainer[]>([]);
   const [workOrders, setWorkOrders] = useState<WorkOrder[]>([]);
 
-  const [selectedBuilding, setSelectedBuilding] = useState(BUILDINGS[0]);
+  const [selectedBuilding, setSelectedBuilding] = useState<string>(
+    BUILDINGS[0] || "DC18"
+  );
   const [selectedShift, setSelectedShift] = useState(SHIFTS[0]);
 
   // Once we know the user is a Lead, force their building selection

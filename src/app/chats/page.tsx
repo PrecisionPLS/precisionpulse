@@ -4,12 +4,15 @@ import Link from "next/link";
 import { useEffect, useMemo, useState, FormEvent } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { useCurrentUser } from "@/lib/useCurrentUser";
+import { BUILDINGS } from "@/lib/buildings";
 
 const CHATS_STORAGE_KEY = "precisionpulse_chats";
 
-const BUILDINGS = ["DC1", "DC5", "DC11", "DC14", "DC18"];
 const SHIFTS = ["1st", "2nd", "3rd", "4th"];
 const CHANNELS = ["General", "Shift Ops", "HR", "Safety", "Other"];
+
+// For filters we want an "ALL" option on top of the shared buildings list
+const BUILDING_FILTER_OPTIONS = ["ALL", ...BUILDINGS];
 
 type ChatMessage = {
   id: string;
@@ -38,7 +41,7 @@ type ChatRow = {
 function rowToChat(row: ChatRow): ChatMessage {
   return {
     id: String(row.id),
-    building: row.building ?? "DC18",
+    building: row.building ?? (BUILDINGS[0] ?? "DC18"),
     shift: row.shift ?? "1st",
     channel: row.channel ?? "General",
     message: row.message ?? "",
@@ -63,7 +66,7 @@ export default function ChatsPage() {
   const [filterChannel, setFilterChannel] = useState<string>("ALL");
 
   // Compose state
-  const [building, setBuilding] = useState<string>("DC18");
+  const [building, setBuilding] = useState<string>(BUILDINGS[0] ?? "DC18");
   const [shift, setShift] = useState<string>("1st");
   const [channel, setChannel] = useState<string>("General");
   const [text, setText] = useState<string>("");

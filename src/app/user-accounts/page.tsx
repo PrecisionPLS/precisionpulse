@@ -5,8 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { useCurrentUser } from "@/lib/useCurrentUser";
-
-const BUILDINGS = ["DC1", "DC5", "DC11", "DC14", "DC18"];
+import { BUILDINGS } from "@/lib/buildings"; // ✅ shared buildings
 
 const ACCESS_ROLES = [
   "Worker",

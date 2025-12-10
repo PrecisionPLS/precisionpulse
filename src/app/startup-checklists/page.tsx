@@ -4,10 +4,10 @@ import Link from "next/link";
 import { useEffect, useMemo, useState, FormEvent } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { useCurrentUser } from "@/lib/useCurrentUser";
+import { BUILDINGS } from "@/lib/buildings"; // ✅ shared buildings
 
 const STARTUP_STORAGE_KEY = "precisionpulse_startup_checklists";
 
-const BUILDINGS = ["DC1", "DC5", "DC11", "DC14", "DC18"];
 const SHIFTS = ["1st", "2nd", "3rd", "4th"];
 
 type ChecklistStatus = "In Progress" | "Completed";
@@ -94,7 +94,7 @@ export default function StartupChecklistsPage() {
   const [records, setRecords] = useState<StartupChecklist[]>([]);
 
   // Form state
-  const [building, setBuilding] = useState(BUILDINGS[0]);
+  const [building, setBuilding] = useState<string>(BUILDINGS[0]);
   const [shift, setShift] = useState(SHIFTS[0]);
   const [date, setDate] = useState<string>(() => {
     const today = new Date();
@@ -115,10 +115,7 @@ export default function StartupChecklistsPage() {
   function persist(next: StartupChecklist[]) {
     setRecords(next);
     if (typeof window !== "undefined") {
-      window.localStorage.setItem(
-        STARTUP_STORAGE_KEY,
-        JSON.stringify(next)
-      );
+      window.localStorage.setItem(STARTUP_STORAGE_KEY, JSON.stringify(next));
     }
   }
 
@@ -190,10 +187,7 @@ export default function StartupChecklistsPage() {
   }, [records]);
 
   const buildingStats = useMemo(() => {
-    const result: Record<
-      string,
-      { total: number; completed: number }
-    > = {};
+    const result: Record<string, { total: number; completed: number }> = {};
     for (const b of BUILDINGS) {
       result[b] = { total: 0, completed: 0 };
     }
@@ -237,8 +231,7 @@ export default function StartupChecklistsPage() {
 
     // only one per building/shift/date (client-side check)
     const existing = records.find(
-      (r) =>
-        r.building === building && r.shift === shift && r.date === date
+      (r) => r.building === building && r.shift === shift && r.date === date
     );
     if (existing) {
       setError(
@@ -268,9 +261,7 @@ export default function StartupChecklistsPage() {
       }
 
       await refreshFromSupabase();
-      setInfo(
-        "Startup checklist created. Use the list below to complete steps."
-      );
+      setInfo("Startup checklist created. Use the list below to complete steps.");
     } catch (e) {
       console.error("Unexpected error creating checklist", e);
       setError("Unexpected error creating checklist.");
@@ -298,8 +289,7 @@ export default function StartupChecklistsPage() {
     };
     const status = getStatus(temp);
     const now = new Date().toISOString();
-    const newCompletedAt =
-      status === "Completed" ? now : undefined;
+    const newCompletedAt = status === "Completed" ? now : undefined;
 
     setSaving(true);
     try {
@@ -368,9 +358,7 @@ export default function StartupChecklistsPage() {
         {/* Summary cards */}
         <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
           <div className="rounded-2xl bg-slate-900 border border-slate-800 p-4">
-            <div className="text-xs text-slate-400 mb-1">
-              Total Checklists
-            </div>
+            <div className="text-xs text-slate-400 mb-1">Total Checklists</div>
             <div className="text-2xl font-semibold text-sky-300">
               {summary.total}
             </div>
@@ -396,9 +384,7 @@ export default function StartupChecklistsPage() {
             </div>
           </div>
           <div className="rounded-2xl bg-slate-900 border border-slate-800 p-4">
-            <div className="text-xs text-slate-400 mb-1">
-              Today Completed
-            </div>
+            <div className="text-xs text-slate-400 mb-1">Today Completed</div>
             <div className="text-2xl font-semibold text-emerald-300">
               {summary.todayCompleted}
             </div>
@@ -416,22 +402,16 @@ export default function StartupChecklistsPage() {
               const rate =
                 stats.total === 0
                   ? 0
-                  : Math.round(
-                      (stats.completed / stats.total) * 100
-                    );
+                  : Math.round((stats.completed / stats.total) * 100);
               return (
                 <div
                   key={b}
                   className="rounded-xl bg-slate-950 border border-slate-800 p-3"
                 >
-                  <div className="text-slate-300 mb-1 font-semibold">
-                    {b}
-                  </div>
+                  <div className="text-slate-300 mb-1 font-semibold">{b}</div>
                   <div className="text-slate-400">
                     Checklists:{" "}
-                    <span className="text-slate-100">
-                      {stats.total}
-                    </span>
+                    <span className="text-slate-100">{stats.total}</span>
                   </div>
                   <div className="text-slate-400">
                     Completed:{" "}
@@ -628,10 +608,7 @@ export default function StartupChecklistsPage() {
                           <div className="text-[11px] text-slate-500">
                             Created: {r.createdAt.slice(0, 10)}
                             {r.completedAt &&
-                              ` • Completed: ${r.completedAt.slice(
-                                0,
-                                10
-                              )}`}
+                              ` • Completed: ${r.completedAt.slice(0, 10)}`}
                           </div>
                         </div>
                         <div className="text-right space-y-1">
@@ -651,9 +628,7 @@ export default function StartupChecklistsPage() {
                           <div className="w-28 h-1.5 rounded-full bg-slate-800 overflow-hidden">
                             <div
                               className="h-full bg-sky-500"
-                              style={{
-                                width: `${progress.percent}%`,
-                              }}
+                              style={{ width: `${progress.percent}%` }}
                             />
                           </div>
                         </div>
@@ -700,10 +675,7 @@ export default function StartupChecklistsPage() {
                           label="WhatsApp broadcast sent"
                           checked={r.items.whatsappBroadcastSent}
                           onToggle={() =>
-                            toggleItem(
-                              r.id,
-                              "whatsappBroadcastSent"
-                            )
+                            toggleItem(r.id, "whatsappBroadcastSent")
                           }
                         />
                       </div>

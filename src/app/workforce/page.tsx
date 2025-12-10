@@ -4,10 +4,10 @@ import Link from "next/link";
 import { useEffect, useMemo, useState, FormEvent } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { useCurrentUser } from "@/lib/useCurrentUser";
+import { BUILDINGS } from "@/lib/buildings"; // ✅ shared buildings
 
 const WORKFORCE_KEY = "precisionpulse_workforce";
 
-const BUILDINGS = ["DC1", "DC5", "DC11", "DC14", "DC18"];
 const STATUS_OPTIONS = ["Active", "On Leave", "Terminated", "Candidate"];
 
 const ACCESS_ROLES = [

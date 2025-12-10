@@ -4,10 +4,10 @@ import Link from "next/link";
 import { useEffect, useMemo, useState, FormEvent } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { useCurrentUser } from "@/lib/useCurrentUser";
+import { BUILDINGS } from "@/lib/buildings"; // ✅ shared buildings
 
 const DAMAGE_KEY = "precisionpulse_damage_reports";
 
-const BUILDINGS = ["DC1", "DC5", "DC11", "DC14", "DC18"];
 const SHIFTS = ["1st", "2nd", "3rd", "4th"];
 const STATUS_OPTIONS = ["Open", "In Review", "Closed"];
 
@@ -40,7 +40,7 @@ type DamageReportRow = {
 function rowToDamageReport(row: DamageReportRow): DamageReport {
   return {
     id: String(row.id),
-    building: row.building ?? "DC18",
+    building: row.building ?? (BUILDINGS[0] || "DC18"),
     shift: row.shift ?? "1st",
     containerNo: row.container_no ?? "",
     piecesTotal: row.pieces_total ?? 0,
@@ -62,7 +62,9 @@ export default function DamageReportsPage() {
 
   // form state
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [building, setBuilding] = useState("DC18");
+  const [building, setBuilding] = useState(
+    leadBuilding || BUILDINGS[0] || "DC18"
+  );
   const [shift, setShift] = useState("1st");
   const [containerNo, setContainerNo] = useState("");
   const [piecesTotal, setPiecesTotal] = useState<string>("");
@@ -137,7 +139,7 @@ export default function DamageReportsPage() {
 
   function resetForm() {
     setEditingId(null);
-    setBuilding(leadBuilding || "DC18");
+    setBuilding(leadBuilding || BUILDINGS[0] || "DC18");
     setShift("1st");
     setContainerNo("");
     setPiecesTotal("");

@@ -1,11 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, FormEvent } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { useCurrentUser } from "@/lib/useCurrentUser";
+import { BUILDINGS } from "@/lib/buildings"; // ✅ shared buildings
 
-const BUILDINGS = ["DC1", "DC5", "DC11", "DC14", "DC18"];
 const SHIFTS = ["1st", "2nd", "3rd", "4th"];
 
 type StaffingRow = {
@@ -62,7 +62,6 @@ function rowToPlan(row: StaffingRow): StaffingPlan {
 
 export default function StaffingPage() {
   const currentUser = useCurrentUser();
-  const isSuperAdmin = currentUser?.accessRole === "Super Admin";
   const isLead = currentUser?.accessRole === "Lead";
   const leadBuilding = currentUser?.building || "";
 
@@ -97,7 +96,6 @@ export default function StaffingPage() {
   function resetForm() {
     setEditingId(null);
     setDate(new Date().toISOString().slice(0, 10));
-    // For leads, force their building; others default to DC18 / last value
     setBuilding(leadBuilding || "DC18");
     setShift("1st");
     setRequiredTotal("0");
@@ -154,7 +152,6 @@ export default function StaffingPage() {
 
       if (error) {
         console.error("Error loading workforce for staffing", error);
-        // not fatal, we can still show plans
         return;
       }
 
@@ -177,7 +174,7 @@ export default function StaffingPage() {
       setWorkforceSummary(result);
     } catch (e) {
       console.error("Unexpected error loading workforce for staffing", e);
-      // ignore, just means "actual" might be 0
+      // ignore; just means "actual" might be 0
     }
   }
 
@@ -202,7 +199,7 @@ export default function StaffingPage() {
     }
   }, [currentUser, isLead, leadBuilding]);
 
-  async function handleSubmit(e: React.FormEvent) {
+  async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     setError(null);
     setInfo(null);
@@ -588,7 +585,6 @@ export default function StaffingPage() {
                     setFilterShift("ALL");
                     setFilterDateFrom("");
                     setFilterDateTo("");
-                    // Only reset building filter to ALL for non-Leads
                     setFilterBuilding(isLead && leadBuilding ? leadBuilding : "ALL");
                   }}
                   className="text-[11px] text-sky-300 hover:underline"
@@ -716,6 +712,7 @@ export default function StaffingPage() {
                       {filteredPlans.map((p) => {
                         const actual = actualByBuilding[p.building] ?? 0;
                         const diff = actual - p.requiredTotal;
+
                         let badgeLabel = "Balanced";
                         let badgeClass =
                           "bg-emerald-900/60 text-emerald-200 border border-emerald-700/70";

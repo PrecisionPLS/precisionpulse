@@ -4,9 +4,9 @@ import { useEffect, useMemo, useState, FormEvent } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { useCurrentUser } from "@/lib/useCurrentUser";
 import { useRouter } from "next/navigation";
+import { BUILDINGS } from "@/lib/buildings"; // ✅ shared buildings
 
 const CONTAINERS_KEY = "precisionpulse_containers";
-const BUILDINGS = ["DC1", "DC5", "DC11", "DC14", "DC18"];
 
 // Workers stored in Supabase JSON
 type WorkerContribution = {
@@ -79,7 +79,7 @@ export default function ContainersPage() {
 
   const [showForm, setShowForm] = useState(false);
   const [formState, setFormState] = useState<EditFormState>({
-    building: currentUser?.building || "DC18",
+    building: currentUser?.building || BUILDINGS[0] || "DC18",
     containerNo: "",
     piecesTotal: 0,
     skusTotal: 0,
@@ -189,7 +189,7 @@ export default function ContainersPage() {
             name:
               (row.work_order_code as string | null) ??
               `Work Order ${String(row.id).slice(-4)}`,
-            building: (row.building as string | null) ?? "DC1",
+            building: (row.building as string | null) ?? (BUILDINGS[0] || "DC1"),
             status: (row.status as string | null) ?? "Pending",
           })) ?? [];
 
@@ -240,7 +240,7 @@ export default function ContainersPage() {
 
   function resetForm() {
     setFormState({
-      building: currentUser?.building || "DC18",
+      building: currentUser?.building || BUILDINGS[0] || "DC18",
       containerNo: "",
       piecesTotal: 0,
       skusTotal: 0,

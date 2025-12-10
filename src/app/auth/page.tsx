@@ -3,6 +3,7 @@
 import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
+import { BUILDINGS } from "@/lib/buildings";
 
 export default function AuthPage() {
   const router = useRouter();
@@ -78,9 +79,7 @@ export default function AuthPage() {
 
         if (profileError) {
           console.error("Profile insert error", profileError);
-          // we show a gentle message but don't block login
-          // setError("Account created, but there was a problem saving your profile.");
-          // (we won't block flow here)
+          // soft-fail on profile
         }
 
         // 3) Ensure we actually have a session by logging in
@@ -185,11 +184,11 @@ export default function AuthPage() {
                   value={building}
                   onChange={(e) => setBuilding(e.target.value)}
                 >
-                  <option value="DC1">DC1</option>
-                  <option value="DC5">DC5</option>
-                  <option value="DC11">DC11</option>
-                  <option value="DC14">DC14</option>
-                  <option value="DC18">DC18</option>
+                  {BUILDINGS.map((b) => (
+                    <option key={b} value={b}>
+                      {b}
+                    </option>
+                  ))}
                 </select>
               </div>
             </>

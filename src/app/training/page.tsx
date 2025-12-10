@@ -4,8 +4,8 @@ import Link from "next/link";
 import { useEffect, useMemo, useState, FormEvent } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { useCurrentUser } from "@/lib/useCurrentUser";
+import { BUILDINGS } from "@/lib/buildings";
 
-const BUILDINGS = ["DC1", "DC5", "DC11", "DC14", "DC18"];
 const ROLES = [
   "Lumper",
   "Lead",

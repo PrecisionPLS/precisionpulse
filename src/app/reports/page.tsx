@@ -4,8 +4,10 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { useCurrentUser } from "@/lib/useCurrentUser";
+import { BUILDINGS } from "@/lib/buildings";
 
-const BUILDINGS = ["ALL", "DC1", "DC5", "DC11", "DC14", "DC18"];
+const BUILDING_OPTIONS = ["ALL", ...BUILDINGS];
+
 const DATE_RANGES = ["Today", "Last 7 days", "Last 30 days", "All time"] as const;
 type DateRange = (typeof DATE_RANGES)[number];
 
@@ -604,7 +606,7 @@ export default function ReportsPage() {
                 {isLead && leadBuilding ? (
                   <option value={leadBuilding}>{leadBuilding}</option>
                 ) : (
-                  BUILDINGS.map((b) => (
+                  BUILDING_OPTIONS.map((b) => (
                     <option key={b} value={b}>
                       {b === "ALL" ? "All Buildings" : b}
                     </option>
@@ -747,13 +749,13 @@ export default function ReportsPage() {
                   PPH by building, shift, and date from container volume.
                 </p>
               </div>
-            <button
-              type="button"
-              onClick={handleDownloadShiftCsv}
-              className="text-[11px] px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-950 hover:bg-slate-800 text-slate-200"
-            >
-              Download CSV
-            </button>
+              <button
+                type="button"
+                onClick={handleDownloadShiftCsv}
+                className="text-[11px] px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-950 hover:bg-slate-800 text-slate-200"
+              >
+                Download CSV
+              </button>
             </div>
             <div className="overflow-auto border border-slate-800 rounded-xl flex-1">
               {shiftRows.length === 0 ? (
@@ -840,7 +842,7 @@ export default function ReportsPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {staffingRows.length === 0 ? null : staffingRows.map((r, idx) => (
+                    {staffingRows.map((r, idx) => (
                       <tr
                         key={`${r.date}-${r.building}-${r.shift}-${idx}`}
                         className="border-b border-slate-800/60 hover:bg-slate-900/60"

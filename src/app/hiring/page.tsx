@@ -4,8 +4,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useState, FormEvent } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { useCurrentUser } from "@/lib/useCurrentUser";
-
-const BUILDINGS = ["DC1", "DC5", "DC11", "DC14", "DC18"];
+import { BUILDINGS } from "@/lib/buildings"; // ✅ shared buildings
 
 const STAGES = [
   "Applied",
@@ -43,7 +42,9 @@ export default function HiringPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
-  const [building, setBuilding] = useState<string>("DC18");
+  const [building, setBuilding] = useState<string>(
+    leadBuilding || BUILDINGS[0] || "DC18"
+  );
   const [stage, setStage] = useState<CandidateStage>("Applied");
   const [source, setSource] = useState("");
   const [notes, setNotes] = useState("");
@@ -107,14 +108,16 @@ export default function HiringPage() {
     setStage("Applied");
     setSource("");
     setNotes("");
-    setBuilding(isLead && leadBuilding ? leadBuilding : "DC18");
+    setBuilding(isLead && leadBuilding ? leadBuilding : BUILDINGS[0] || "DC18");
   }
 
   function startEdit(c: CandidateRow) {
     setEditingId(c.id);
     setName(c.name || "");
     setPhone(c.phone || "");
-    setBuilding(c.building || (isLead && leadBuilding ? leadBuilding : "DC18"));
+    setBuilding(
+      c.building || (isLead && leadBuilding ? leadBuilding : BUILDINGS[0] || "DC18")
+    );
     setStage((c.stage as CandidateStage) || "Applied");
     setSource(c.source || "");
     setNotes(c.notes || "");
@@ -296,7 +299,9 @@ export default function HiringPage() {
     let rows = [...candidates];
 
     if (effectiveFilterBuilding !== "ALL") {
-      rows = rows.filter((c) => (c.building || "") === effectiveFilterBuilding);
+      rows = rows.filter(
+        (c) => (c.building || "") === effectiveFilterBuilding
+      );
     }
     if (filterStage !== "ALL") {
       rows = rows.filter((c) => (c.stage || "Applied") === filterStage);
@@ -307,9 +312,7 @@ export default function HiringPage() {
         const name = c.name?.toLowerCase() || "";
         const phone = c.phone?.toLowerCase() || "";
         const source = c.source?.toLowerCase() || "";
-        return (
-          name.includes(q) || phone.includes(q) || source.includes(q)
-        );
+        return name.includes(q) || phone.includes(q) || source.includes(q);
       });
     }
 
