@@ -7,11 +7,12 @@ import { useCurrentUser } from "@/lib/useCurrentUser";
 import { BUILDINGS } from "@/lib/buildings";
 
 const BUILDING_OPTIONS = ["ALL", ...BUILDINGS];
+const SHIFT_OPTIONS = ["ALL", "1st", "2nd", "3rd", "4th"] as const;
 
 const WORK_ORDERS_KEY = "precisionpulse_work_orders";
 const CONTAINERS_KEY = "precisionpulse_containers";
 
-const DATE_RANGES = ["Today", "Last 7 days", "Last 30 days", "All time"] as const;
+const DATE_RANGES = ["Today", "Last 7 days", "Last 30 days", "All time", "Custom"] as const;
 type DateRange = (typeof DATE_RANGES)[number];
 
 type ContainerWorker = {
@@ -20,7 +21,6 @@ type ContainerWorker = {
   minutesWorked?: number | null;
   percentContribution?: number | null;
   payoutAmount?: number | null;
-  // allow extra fields
   [key: string]: any;
 };
 
@@ -35,7 +35,6 @@ type ContainerRow = {
   skus_total?: number | null;
   container_pay_total?: number | null;
   workers?: ContainerWorker[] | null;
-  // allow extra fields
   [key: string]: any;
 };
 
@@ -110,42 +109,41 @@ function parseDateOnly(value: string | null | undefined): string | null {
   return value.slice(0, 10);
 }
 
-function isWithinRange(dateStr: string | null, range: DateRange): boolean {
-  if (!dateStr) {
-    return range === "All time";
-  }
+function isWithinPreset(dateStr: string | null, range: DateRange): boolean {
+  if (!dateStr) return range === "All time";
   if (range === "All time") return true;
+  if (range === "Custom") return true; // handled by custom range check
 
   const only = dateStr.slice(0, 10);
   const d = new Date(only);
   if (Number.isNaN(d.getTime())) return false;
 
   const today = new Date();
-  const todayOnly = new Date(
-    today.getFullYear(),
-    today.getMonth(),
-    today.getDate()
-  );
-
+  const todayOnly = new Date(today.getFullYear(), today.getMonth(), today.getDate());
   const diffMs = todayOnly.getTime() - d.getTime();
   const diffDays = diffMs / (1000 * 60 * 60 * 24);
 
-  if (range === "Today") {
-    return only === today.toISOString().slice(0, 10);
-  }
-  if (range === "Last 7 days") {
-    return diffDays >= 0 && diffDays <= 7;
-  }
-  if (range === "Last 30 days") {
-    return diffDays >= 0 && diffDays <= 30;
-  }
+  if (range === "Today") return only === today.toISOString().slice(0, 10);
+  if (range === "Last 7 days") return diffDays >= 0 && diffDays <= 7;
+  if (range === "Last 30 days") return diffDays >= 0 && diffDays <= 30;
 
+  return true;
+}
+
+function isWithinCustom(dateStr: string | null, start: string | null, end: string | null): boolean {
+  if (!dateStr) return false;
+  const only = dateStr.slice(0, 10);
+
+  // if user didn't set one side, treat it as open-ended
+  if (!start && !end) return true;
+
+  if (start && only < start) return false;
+  if (end && only > end) return false;
   return true;
 }
 
 /**
  * Helper readers that try multiple key names.
- * Adjust/add aliases here if your real field names are different.
  */
 function getContainerDate(c: ContainerRow): string | null {
   return (
@@ -189,7 +187,6 @@ function getContainerNo(c: ContainerRow): string {
   );
 }
 
-// 🔧 FIXED: broaden aliases for piece count and guard for NaN
 function getPiecesTotal(c: ContainerRow): number {
   const possible =
     (c.pieces_total as number | undefined) ??
@@ -202,9 +199,7 @@ function getPiecesTotal(c: ContainerRow): number {
     (c.piece_count as number | undefined) ??
     (c.total_piece_count as number | undefined);
 
-  return typeof possible === "number" && !Number.isNaN(possible)
-    ? possible
-    : 0;
+  return typeof possible === "number" && !Number.isNaN(possible) ? possible : 0;
 }
 
 function getSkusTotal(c: ContainerRow): number {
@@ -295,7 +290,7 @@ function downloadCsv(filename: string, header: string[], rows: (string | number)
 }
 
 export default function ReportsPage() {
-  const currentUser = useCurrentUser(); // redirect handled inside
+  const currentUser = useCurrentUser();
 
   const isLead = currentUser?.accessRole === "Lead";
   const leadBuilding = currentUser?.building || "";
@@ -308,7 +303,13 @@ export default function ReportsPage() {
   const [error, setError] = useState<string | null>(null);
 
   const [buildingFilter, setBuildingFilter] = useState<string>("ALL");
+  const [shiftFilter, setShiftFilter] = useState<(typeof SHIFT_OPTIONS)[number]>("ALL");
+
+  // presets + custom range
   const [dateRange, setDateRange] = useState<DateRange>("Last 7 days");
+  const [customStart, setCustomStart] = useState<string>(""); // YYYY-MM-DD
+  const [customEnd, setCustomEnd] = useState<string>(""); // YYYY-MM-DD
+  const [showAdvanced, setShowAdvanced] = useState<boolean>(true);
 
   // Load containers + work orders from localStorage
   useEffect(() => {
@@ -318,17 +319,13 @@ export default function ReportsPage() {
       const contRaw = window.localStorage.getItem(CONTAINERS_KEY);
       if (contRaw) {
         const parsed = JSON.parse(contRaw);
-        if (Array.isArray(parsed)) {
-          setContainers(parsed as ContainerRow[]);
-        }
+        if (Array.isArray(parsed)) setContainers(parsed as ContainerRow[]);
       }
 
       const woRaw = window.localStorage.getItem(WORK_ORDERS_KEY);
       if (woRaw) {
         const parsed = JSON.parse(woRaw);
-        if (Array.isArray(parsed)) {
-          setWorkOrders(parsed as WorkOrderRecord[]);
-        }
+        if (Array.isArray(parsed)) setWorkOrders(parsed as WorkOrderRecord[]);
       }
     } catch (e) {
       console.error("Error loading containers/work orders from localStorage", e);
@@ -374,37 +371,53 @@ export default function ReportsPage() {
     }
   }, [isLead, leadBuilding]);
 
-  const effectiveBuildingFilter =
-    isLead && leadBuilding ? leadBuilding : buildingFilter;
+  const effectiveBuildingFilter = isLead && leadBuilding ? leadBuilding : buildingFilter;
 
   function matchesBuilding(b: string | null | undefined): boolean {
     if (effectiveBuildingFilter === "ALL") return true;
     return (b || "") === effectiveBuildingFilter;
   }
 
+  function matchesShift(s: string | null | undefined): boolean {
+    if (shiftFilter === "ALL") return true;
+    return (s || "") === shiftFilter;
+  }
+
+  const isDateMatch = (dateStr: string | null) => {
+    if (!isWithinPreset(dateStr, dateRange)) return false;
+
+    if (dateRange === "Custom") {
+      const start = customStart.trim() ? customStart.trim() : null;
+      const end = customEnd.trim() ? customEnd.trim() : null;
+      return isWithinCustom(dateStr, start, end);
+    }
+
+    return true;
+  };
+
   // Filtered containers and staffing
   const filteredContainers = useMemo(() => {
     return containers.filter((c) => {
       if (!matchesBuilding(getContainerBuilding(c))) return false;
+      if (!matchesShift(getContainerShift(c))) return false;
       const d = getContainerDate(c);
-      return isWithinRange(d, dateRange);
+      return isDateMatch(d);
     });
-  }, [containers, effectiveBuildingFilter, dateRange]);
+  }, [containers, effectiveBuildingFilter, shiftFilter, dateRange, customStart, customEnd]);
 
   const filteredStaffing = useMemo(() => {
     return staffing.filter((s) => {
       if (!matchesBuilding(s.building ?? null)) return false;
+      if (!matchesShift(s.shift ?? null)) return false;
       const d = parseDateOnly(s.date ?? null);
-      return isWithinRange(d, dateRange);
+      return isDateMatch(d);
     });
-  }, [staffing, effectiveBuildingFilter, dateRange]);
+  }, [staffing, effectiveBuildingFilter, shiftFilter, dateRange, customStart, customEnd]);
 
   // Map work orders by id
   const workOrderMap = useMemo(() => {
     const map = new Map<string, WorkOrderRecord>();
-    for (const wo of workOrders) {
-      map.set(String(wo.id), wo);
-    }
+    for (const wo of workOrders) map.set(String(wo.id), wo);
     return map;
   }, [workOrders]);
 
@@ -427,11 +440,6 @@ export default function ReportsPage() {
       const workOrderName = workOrder?.name ?? "";
 
       for (const w of workersArr) {
-        const workerName = getWorkerName(w);
-        const minutesWorked = getWorkerMinutes(w);
-        const percentContribution = getWorkerPercent(w);
-        const payoutAmount = getWorkerPayout(w);
-
         rows.push({
           date,
           building,
@@ -439,10 +447,10 @@ export default function ReportsPage() {
           workOrderId,
           workOrderName,
           containerNo,
-          workerName,
-          minutesWorked,
-          percentContribution,
-          payoutAmount,
+          workerName: getWorkerName(w),
+          minutesWorked: getWorkerMinutes(w),
+          percentContribution: getWorkerPercent(w),
+          payoutAmount: getWorkerPayout(w),
           containerPayTotal: containerPay,
           piecesTotal,
           skusTotal,
@@ -452,9 +460,7 @@ export default function ReportsPage() {
 
     rows.sort((a, b) => {
       if (a.date === b.date) {
-        if (a.workOrderName === b.workOrderName) {
-          return a.containerNo.localeCompare(b.containerNo);
-        }
+        if (a.workOrderName === b.workOrderName) return a.containerNo.localeCompare(b.containerNo);
         return (a.workOrderName || "").localeCompare(b.workOrderName || "");
       }
       return a.date.localeCompare(b.date);
@@ -475,21 +481,10 @@ export default function ReportsPage() {
 
       const pieces = getPiecesTotal(c);
       const workersArr = (c.workers || []) as ContainerWorker[];
-      const minutes = workersArr.reduce(
-        (sum, w) => sum + getWorkerMinutes(w),
-        0
-      );
+      const minutes = workersArr.reduce((sum, w) => sum + getWorkerMinutes(w), 0);
 
       if (!map.has(key)) {
-        map.set(key, {
-          date,
-          building,
-          shift,
-          containers: 0,
-          piecesTotal: 0,
-          minutesTotal: 0,
-          pph: 0,
-        });
+        map.set(key, { date, building, shift, containers: 0, piecesTotal: 0, minutesTotal: 0, pph: 0 });
       }
 
       const row = map.get(key)!;
@@ -499,13 +494,10 @@ export default function ReportsPage() {
     }
 
     for (const row of map.values()) {
-      row.pph =
-        row.minutesTotal === 0 ? 0 : (row.piecesTotal * 60) / row.minutesTotal;
+      row.pph = row.minutesTotal === 0 ? 0 : (row.piecesTotal * 60) / row.minutesTotal;
     }
 
-    return Array.from(map.values()).sort((a, b) =>
-      a.date.localeCompare(b.date)
-    );
+    return Array.from(map.values()).sort((a, b) => a.date.localeCompare(b.date));
   }, [filteredContainers]);
 
   // 3) Staffing view
@@ -525,15 +517,7 @@ export default function ReportsPage() {
       else if (delta > 0) status = "Overstaffed";
       else status = "Balanced";
 
-      rows.push({
-        date,
-        building,
-        shift,
-        required,
-        actual,
-        delta,
-        status,
-      });
+      rows.push({ date, building, shift, required, actual, delta, status });
     }
 
     rows.sort((a, b) => {
@@ -588,11 +572,8 @@ export default function ReportsPage() {
         const entry = map.get(key)!;
         if (building) entry.buildings.add(building);
 
-        const minutes = getWorkerMinutes(w);
-        const payout = getWorkerPayout(w);
-
-        entry.totalPayout += payout;
-        entry.totalMinutes += minutes;
+        entry.totalPayout += getWorkerPayout(w);
+        entry.totalMinutes += getWorkerMinutes(w);
 
         if (!uniqueContainerWorkers.has(key)) {
           entry.totalContainers += 1;
@@ -606,16 +587,9 @@ export default function ReportsPage() {
     for (const entry of map.values()) {
       const buildingsArr = Array.from(entry.buildings);
       const buildingLabel =
-        buildingsArr.length === 0
-          ? "Unknown"
-          : buildingsArr.length === 1
-          ? buildingsArr[0]
-          : "Multiple";
+        buildingsArr.length === 0 ? "Unknown" : buildingsArr.length === 1 ? buildingsArr[0] : "Multiple";
 
-      const avgPPH =
-        entry.totalMinutes === 0
-          ? 0
-          : (entry.totalPieces * 60) / entry.totalMinutes;
+      const avgPPH = entry.totalMinutes === 0 ? 0 : (entry.totalPieces * 60) / entry.totalMinutes;
 
       rows.push({
         workerName: entry.workerName,
@@ -629,109 +603,47 @@ export default function ReportsPage() {
     }
 
     rows.sort((a, b) => b.totalPayout - a.totalPayout);
-
     return rows.slice(0, 25);
   }, [filteredContainers]);
 
-  // CSV handlers
+  function makeFilterLabel() {
+    const b = effectiveBuildingFilter === "ALL" ? "all-buildings" : effectiveBuildingFilter.toLowerCase();
+    const s = shiftFilter === "ALL" ? "all-shifts" : String(shiftFilter).toLowerCase();
+    let d = dateRange.replace(/\s+/g, "-").toLowerCase();
+    if (dateRange === "Custom") {
+      const cs = customStart ? customStart : "start";
+      const ce = customEnd ? customEnd : "end";
+      d = `custom-${cs}-to-${ce}`;
+    }
+    return `${b}-${s}-${d}`;
+  }
+
+  // CSV handlers (same outputs, now obey shift + custom dates too)
   function handleDownloadProductionCsv() {
     const header = [
-      "Date",
-      "Building",
-      "Shift",
-      "Work Order",
-      "Container #",
-      "Worker",
-      "Minutes Worked",
-      "% Contribution",
-      "Payout Amount",
-      "Container Pay Total",
-      "Pieces Total",
-      "SKUs Total",
+      "Date","Building","Shift","Work Order","Container #","Worker","Minutes Worked",
+      "% Contribution","Payout Amount","Container Pay Total","Pieces Total","SKUs Total",
     ];
     const rows = productionRows.map((r) => [
-      r.date,
-      r.building,
-      r.shift,
-      r.workOrderName || r.workOrderId || "",
-      r.containerNo,
-      r.workerName,
-      r.minutesWorked,
-      r.percentContribution,
-      r.payoutAmount.toFixed(2),
-      r.containerPayTotal.toFixed(2),
-      r.piecesTotal,
-      r.skusTotal,
+      r.date, r.building, r.shift, r.workOrderName || r.workOrderId || "",
+      r.containerNo, r.workerName, r.minutesWorked, r.percentContribution,
+      r.payoutAmount.toFixed(2), r.containerPayTotal.toFixed(2), r.piecesTotal, r.skusTotal,
     ]);
-    const label =
-      effectiveBuildingFilter === "ALL"
-        ? "all-buildings"
-        : effectiveBuildingFilter.toLowerCase();
-    downloadCsv(
-      `production-pay-${label}-${dateRange.replace(/\s+/g, "-").toLowerCase()}.csv`,
-      header,
-      rows
-    );
+    downloadCsv(`production-pay-${makeFilterLabel()}.csv`, header, rows);
   }
 
   function handleDownloadShiftCsv() {
-    const header = [
-      "Date",
-      "Building",
-      "Shift",
-      "Containers",
-      "Pieces Total",
-      "Minutes Total",
-      "PPH",
-    ];
+    const header = ["Date","Building","Shift","Containers","Pieces Total","Minutes Total","PPH"];
     const rows = shiftRows.map((r) => [
-      r.date,
-      r.building,
-      r.shift,
-      r.containers,
-      r.piecesTotal,
-      r.minutesTotal,
-      r.pph.toFixed(1),
+      r.date, r.building, r.shift, r.containers, r.piecesTotal, r.minutesTotal, r.pph.toFixed(1),
     ]);
-    const label =
-      effectiveBuildingFilter === "ALL"
-        ? "all-buildings"
-        : effectiveBuildingFilter.toLowerCase();
-    downloadCsv(
-      `shift-performance-${label}-${dateRange.replace(/\s+/g, "-").toLowerCase()}.csv`,
-      header,
-      rows
-    );
+    downloadCsv(`shift-performance-${makeFilterLabel()}.csv`, header, rows);
   }
 
   function handleDownloadStaffingCsv() {
-    const header = [
-      "Date",
-      "Building",
-      "Shift",
-      "Required",
-      "Actual",
-      "Delta",
-      "Status",
-    ];
-    const rows = staffingRows.map((r) => [
-      r.date,
-      r.building,
-      r.shift,
-      r.required,
-      r.actual,
-      r.delta,
-      r.status,
-    ]);
-    const label =
-      effectiveBuildingFilter === "ALL"
-        ? "all-buildings"
-        : effectiveBuildingFilter.toLowerCase();
-    downloadCsv(
-      `staffing-coverage-${label}-${dateRange.replace(/\s+/g, "-").toLowerCase()}.csv`,
-      header,
-      rows
-    );
+    const header = ["Date","Building","Shift","Required","Actual","Delta","Status"];
+    const rows = staffingRows.map((r) => [r.date, r.building, r.shift, r.required, r.actual, r.delta, r.status]);
+    downloadCsv(`staffing-coverage-${makeFilterLabel()}.csv`, header, rows);
   }
 
   if (!currentUser) {
@@ -742,8 +654,8 @@ export default function ReportsPage() {
     );
   }
 
-  const buildingLabel =
-    effectiveBuildingFilter === "ALL" ? "All Buildings" : effectiveBuildingFilter;
+  const buildingLabel = effectiveBuildingFilter === "ALL" ? "All Buildings" : effectiveBuildingFilter;
+  const shiftLabel = shiftFilter === "ALL" ? "All Shifts" : shiftFilter;
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-950 to-slate-900 text-slate-50">
@@ -751,58 +663,23 @@ export default function ReportsPage() {
         {/* Header */}
         <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
           <div>
-            <h1 className="text-2xl font-semibold text-slate-50">
-              Reports & KPIs
-            </h1>
+            <h1 className="text-2xl font-semibold text-slate-50">Reports & KPIs</h1>
             <p className="text-sm text-slate-400">
-              Live analytics for production pay, shift performance, staffing,
-              and worker leaderboard across{" "}
-              <span className="font-semibold text-sky-300">
-                {buildingLabel}
-              </span>{" "}
-              ({dateRange}).
+              Live analytics across{" "}
+              <span className="font-semibold text-sky-300">{buildingLabel}</span>{" "}
+              • <span className="font-semibold text-sky-300">{shiftLabel}</span>{" "}
+              • <span className="text-slate-300">{dateRange === "Custom" ? "Custom range" : dateRange}</span>
             </p>
-            {loading && (
+            {dateRange === "Custom" && (
               <p className="mt-1 text-[11px] text-slate-500">
-                Loading Supabase staffing data…
+                Range: {customStart || "—"} → {customEnd || "—"}
               </p>
             )}
-            {error && (
-              <p className="mt-1 text-[11px] text-amber-400">{error}</p>
-            )}
+            {loading && <p className="mt-1 text-[11px] text-slate-500">Loading Supabase staffing data…</p>}
+            {error && <p className="mt-1 text-[11px] text-amber-400">{error}</p>}
           </div>
+
           <div className="flex flex-col items-end gap-2 text-xs">
-            <div className="flex flex-wrap gap-2">
-              <select
-                className="rounded-lg bg-slate-900 border border-slate-700 px-3 py-1.5 text-slate-50"
-                value={effectiveBuildingFilter}
-                onChange={(e) => setBuildingFilter(e.target.value)}
-                disabled={isLead && !!leadBuilding}
-              >
-                {isLead && leadBuilding ? (
-                  <option value={leadBuilding}>{leadBuilding}</option>
-                ) : (
-                  BUILDING_OPTIONS.map((b) => (
-                    <option key={b} value={b}>
-                      {b === "ALL" ? "All Buildings" : b}
-                    </option>
-                  ))
-                )}
-              </select>
-              <select
-                className="rounded-lg bg-slate-900 border border-slate-700 px-3 py-1.5 text-slate-50"
-                value={dateRange}
-                onChange={(e) =>
-                  setDateRange(e.target.value as DateRange)
-                }
-              >
-                {DATE_RANGES.map((r) => (
-                  <option key={r} value={r}>
-                    {r}
-                  </option>
-                ))}
-              </select>
-            </div>
             <Link
               href="/"
               className="mt-1 inline-flex items-center px-3 py-1 rounded-full border border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800"
@@ -812,28 +689,123 @@ export default function ReportsPage() {
           </div>
         </div>
 
+        {/* Advanced Filters */}
+        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
+          <div className="flex items-center justify-between">
+            <h2 className="text-sm font-semibold text-slate-100">Filters</h2>
+            <button
+              type="button"
+              onClick={() => setShowAdvanced((p) => !p)}
+              className="text-[11px] text-sky-300 hover:underline"
+            >
+              {showAdvanced ? "Hide" : "Show"}
+            </button>
+          </div>
+
+          {showAdvanced && (
+            <div className="mt-3 grid grid-cols-1 md:grid-cols-4 gap-3 text-xs">
+              <div>
+                <div className="text-[11px] text-slate-400 mb-1">Building</div>
+                <select
+                  className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2 text-slate-50"
+                  value={effectiveBuildingFilter}
+                  onChange={(e) => setBuildingFilter(e.target.value)}
+                  disabled={isLead && !!leadBuilding}
+                >
+                  {isLead && leadBuilding ? (
+                    <option value={leadBuilding}>{leadBuilding}</option>
+                  ) : (
+                    BUILDING_OPTIONS.map((b) => (
+                      <option key={b} value={b}>
+                        {b === "ALL" ? "All Buildings" : b}
+                      </option>
+                    ))
+                  )}
+                </select>
+              </div>
+
+              <div>
+                <div className="text-[11px] text-slate-400 mb-1">Shift</div>
+                <select
+                  className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2 text-slate-50"
+                  value={shiftFilter}
+                  onChange={(e) => setShiftFilter(e.target.value as any)}
+                >
+                  {SHIFT_OPTIONS.map((s) => (
+                    <option key={s} value={s}>
+                      {s === "ALL" ? "All Shifts" : s}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <div className="text-[11px] text-slate-400 mb-1">Date Preset</div>
+                <select
+                  className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2 text-slate-50"
+                  value={dateRange}
+                  onChange={(e) => setDateRange(e.target.value as DateRange)}
+                >
+                  {DATE_RANGES.map((r) => (
+                    <option key={r} value={r}>
+                      {r}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="flex items-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShiftFilter("ALL");
+                    setDateRange("Last 7 days");
+                    setCustomStart("");
+                    setCustomEnd("");
+                    setBuildingFilter(isLead && leadBuilding ? leadBuilding : "ALL");
+                  }}
+                  className="w-full rounded-lg border border-slate-700 bg-slate-950 hover:bg-slate-800 px-3 py-2 text-[11px] text-slate-200"
+                >
+                  Reset
+                </button>
+              </div>
+
+              {/* Custom date range */}
+              {dateRange === "Custom" && (
+                <>
+                  <div>
+                    <div className="text-[11px] text-slate-400 mb-1">Start Date</div>
+                    <input
+                      type="date"
+                      className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2 text-slate-50"
+                      value={customStart}
+                      onChange={(e) => setCustomStart(e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <div className="text-[11px] text-slate-400 mb-1">End Date</div>
+                    <input
+                      type="date"
+                      className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2 text-slate-50"
+                      value={customEnd}
+                      onChange={(e) => setCustomEnd(e.target.value)}
+                    />
+                  </div>
+                  <div className="md:col-span-2 text-[11px] text-slate-500 flex items-center">
+                    Tip: pick a week (Sun–Sat) or any range, then download CSVs.
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+
         {/* Top summary strip */}
         <div className="grid grid-cols-1 md:grid-cols-4 gap-3 text-xs">
-          <SummaryCard
-            label="Production rows"
-            value={productionRows.length}
-            hint="Worker x container lines"
-          />
-          <SummaryCard
-            label="Shift groups"
-            value={shiftRows.length}
-            hint="Building x shift x date"
-          />
-          <SummaryCard
-            label="Staffing entries"
-            value={staffingRows.length}
-            hint="Coverage per shift"
-          />
-          <SummaryCard
-            label="Leaderboard workers"
-            value={leaderboardRows.length}
-            hint="Top payout / pieces"
-          />
+          <SummaryCard label="Production rows" value={productionRows.length} hint="Worker x container lines" />
+          <SummaryCard label="Shift groups" value={shiftRows.length} hint="Building x shift x date" />
+          <SummaryCard label="Staffing entries" value={staffingRows.length} hint="Coverage per shift" />
+          <SummaryCard label="Leaderboard workers" value={leaderboardRows.length} hint="Top payout / pieces" />
         </div>
 
         {/* Layout: 2x2 grid */}
@@ -842,12 +814,9 @@ export default function ReportsPage() {
           <section className="bg-slate-900 border border-slate-800 rounded-2xl p-4 text-xs flex flex-col max-h-[480px]">
             <div className="flex items-center justify-between mb-2">
               <div>
-                <h2 className="text-sm font-semibold text-slate-100">
-                  Production Pay Report
-                </h2>
+                <h2 className="text-sm font-semibold text-slate-100">Production Pay Report</h2>
                 <p className="text-[11px] text-slate-500">
-                  Per worker, per container payout with pieces, SKUs, and work
-                  order number.
+                  Per worker, per container payout with pieces, SKUs, and work order number.
                 </p>
               </div>
               <button
@@ -860,9 +829,7 @@ export default function ReportsPage() {
             </div>
             <div className="overflow-auto border border-slate-800 rounded-xl flex-1">
               {productionRows.length === 0 ? (
-                <p className="p-3 text-[11px] text-slate-500">
-                  No production pay records for this filter.
-                </p>
+                <p className="p-3 text-[11px] text-slate-500">No production pay records for this filter.</p>
               ) : (
                 <table className="min-w-full text-left border-collapse">
                   <thead>
@@ -874,7 +841,7 @@ export default function ReportsPage() {
                       <th className="px-3 py-2">Container</th>
                       <th className="px-3 py-2">Worker</th>
                       <th className="px-3 py-2 text-right">Minutes</th>
-                      <th className="px-3 py-2 text-right">% </th>
+                      <th className="px-3 py-2 text-right">%</th>
                       <th className="px-3 py-2 text-right">Payout</th>
                       <th className="px-3 py-2 text-right">Pay Total</th>
                       <th className="px-3 py-2 text-right">Pieces</th>
@@ -889,28 +856,14 @@ export default function ReportsPage() {
                         <td className="px-3 py-1.5">{r.date}</td>
                         <td className="px-3 py-1.5">{r.building}</td>
                         <td className="px-3 py-1.5">{r.shift}</td>
-                        <td className="px-3 py-1.5">
-                          {r.workOrderName || r.workOrderId || "—"}
-                        </td>
-                        <td className="px-3 py-1.5 font-mono text-[11px]">
-                          {r.containerNo}
-                        </td>
+                        <td className="px-3 py-1.5">{r.workOrderName || r.workOrderId || "—"}</td>
+                        <td className="px-3 py-1.5 font-mono text-[11px]">{r.containerNo}</td>
                         <td className="px-3 py-1.5">{r.workerName}</td>
-                        <td className="px-3 py-1.5 text-right">
-                          {r.minutesWorked}
-                        </td>
-                        <td className="px-3 py-1.5 text-right">
-                          {r.percentContribution.toFixed(0)}%
-                        </td>
-                        <td className="px-3 py-1.5 text-right text-emerald-300">
-                          ${r.payoutAmount.toFixed(2)}
-                        </td>
-                        <td className="px-3 py-1.5 text-right text-slate-300">
-                          ${r.containerPayTotal.toFixed(2)}
-                        </td>
-                        <td className="px-3 py-1.5 text-right">
-                          {r.piecesTotal}
-                        </td>
+                        <td className="px-3 py-1.5 text-right">{r.minutesWorked}</td>
+                        <td className="px-3 py-1.5 text-right">{r.percentContribution.toFixed(0)}%</td>
+                        <td className="px-3 py-1.5 text-right text-emerald-300">${r.payoutAmount.toFixed(2)}</td>
+                        <td className="px-3 py-1.5 text-right text-slate-300">${r.containerPayTotal.toFixed(2)}</td>
+                        <td className="px-3 py-1.5 text-right">{r.piecesTotal}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -923,12 +876,8 @@ export default function ReportsPage() {
           <section className="bg-slate-900 border border-slate-800 rounded-2xl p-4 text-xs flex flex-col max-h-[480px]">
             <div className="flex items-center justify-between mb-2">
               <div>
-                <h2 className="text-sm font-semibold text-slate-100">
-                  Shift Performance
-                </h2>
-                <p className="text-[11px] text-slate-500">
-                  PPH by building, shift, and date from container volume.
-                </p>
+                <h2 className="text-sm font-semibold text-slate-100">Shift Performance</h2>
+                <p className="text-[11px] text-slate-500">PPH by building, shift, and date from container volume.</p>
               </div>
               <button
                 type="button"
@@ -940,9 +889,7 @@ export default function ReportsPage() {
             </div>
             <div className="overflow-auto border border-slate-800 rounded-xl flex-1">
               {shiftRows.length === 0 ? (
-                <p className="p-3 text-[11px] text-slate-500">
-                  No shift performance data for this filter.
-                </p>
+                <p className="p-3 text-[11px] text-slate-500">No shift performance data for this filter.</p>
               ) : (
                 <table className="min-w-full text-left border-collapse">
                   <thead>
@@ -965,18 +912,10 @@ export default function ReportsPage() {
                         <td className="px-3 py-1.5">{r.date}</td>
                         <td className="px-3 py-1.5">{r.building}</td>
                         <td className="px-3 py-1.5">{r.shift}</td>
-                        <td className="px-3 py-1.5 text-right">
-                          {r.containers}
-                        </td>
-                        <td className="px-3 py-1.5 text-right">
-                          {r.piecesTotal}
-                        </td>
-                        <td className="px-3 py-1.5 text-right">
-                          {r.minutesTotal}
-                        </td>
-                        <td className="px-3 py-1.5 text-right text-sky-300">
-                          {r.pph.toFixed(1)}
-                        </td>
+                        <td className="px-3 py-1.5 text-right">{r.containers}</td>
+                        <td className="px-3 py-1.5 text-right">{r.piecesTotal}</td>
+                        <td className="px-3 py-1.5 text-right">{r.minutesTotal}</td>
+                        <td className="px-3 py-1.5 text-right text-sky-300">{r.pph.toFixed(1)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -989,12 +928,8 @@ export default function ReportsPage() {
           <section className="bg-slate-900 border border-slate-800 rounded-2xl p-4 text-xs flex flex-col max-h-[480px]">
             <div className="flex items-center justify-between mb-2">
               <div>
-                <h2 className="text-sm font-semibold text-slate-100">
-                  Staffing Coverage
-                </h2>
-                <p className="text-[11px] text-slate-500">
-                  Required vs actual headcount per building/shift.
-                </p>
+                <h2 className="text-sm font-semibold text-slate-100">Staffing Coverage</h2>
+                <p className="text-[11px] text-slate-500">Required vs actual headcount per building/shift.</p>
               </div>
               <button
                 type="button"
@@ -1006,9 +941,7 @@ export default function ReportsPage() {
             </div>
             <div className="overflow-auto border border-slate-800 rounded-xl flex-1">
               {staffingRows.length === 0 ? (
-                <p className="p-3 text-[11px] text-slate-500">
-                  No staffing coverage records for this filter.
-                </p>
+                <p className="p-3 text-[11px] text-slate-500">No staffing coverage records for this filter.</p>
               ) : (
                 <table className="min-w-full text-left border-collapse">
                   <thead>
@@ -1031,15 +964,9 @@ export default function ReportsPage() {
                         <td className="px-3 py-1.5">{r.date}</td>
                         <td className="px-3 py-1.5">{r.building}</td>
                         <td className="px-3 py-1.5">{r.shift}</td>
-                        <td className="px-3 py-1.5 text-right">
-                          {r.required}
-                        </td>
-                        <td className="px-3 py-1.5 text-right">
-                          {r.actual}
-                        </td>
-                        <td className="px-3 py-1.5 text-right">
-                          {r.delta}
-                        </td>
+                        <td className="px-3 py-1.5 text-right">{r.required}</td>
+                        <td className="px-3 py-1.5 text-right">{r.actual}</td>
+                        <td className="px-3 py-1.5 text-right">{r.delta}</td>
                         <td className="px-3 py-1.5 text-right">
                           <span
                             className={
@@ -1066,19 +993,13 @@ export default function ReportsPage() {
           <section className="bg-slate-900 border border-slate-800 rounded-2xl p-4 text-xs flex flex-col max-h-[480px]">
             <div className="flex items-center justify-between mb-2">
               <div>
-                <h2 className="text-sm font-semibold text-slate-100">
-                  Worker Leaderboard
-                </h2>
-                <p className="text-[11px] text-slate-500">
-                  Top workers by total payout, pieces, and efficiency.
-                </p>
+                <h2 className="text-sm font-semibold text-slate-100">Worker Leaderboard</h2>
+                <p className="text-[11px] text-slate-500">Top workers by total payout, pieces, and efficiency.</p>
               </div>
             </div>
             <div className="overflow-auto border border-slate-800 rounded-xl flex-1">
               {leaderboardRows.length === 0 ? (
-                <p className="p-3 text-[11px] text-slate-500">
-                  No worker leaderboard data for this filter.
-                </p>
+                <p className="p-3 text-[11px] text-slate-500">No worker leaderboard data for this filter.</p>
               ) : (
                 <table className="min-w-full text-left border-collapse">
                   <thead>
@@ -1094,27 +1015,14 @@ export default function ReportsPage() {
                   </thead>
                   <tbody>
                     {leaderboardRows.map((r) => (
-                      <tr
-                        key={r.workerName}
-                        className="border-b border-slate-800/60 hover:bg-slate-900/60"
-                      >
+                      <tr key={r.workerName} className="border-b border-slate-800/60 hover:bg-slate-900/60">
                         <td className="px-3 py-1.5">{r.workerName}</td>
                         <td className="px-3 py-1.5">{r.building}</td>
-                        <td className="px-3 py-1.5 text-right">
-                          {r.totalContainers}
-                        </td>
-                        <td className="px-3 py-1.5 text-right">
-                          {r.totalPieces}
-                        </td>
-                        <td className="px-3 py-1.5 text-right">
-                          {r.totalMinutes}
-                        </td>
-                        <td className="px-3 py-1.5 text-right text-sky-300">
-                          {r.avgPPH.toFixed(1)}
-                        </td>
-                        <td className="px-3 py-1.5 text-right text-emerald-300">
-                          ${r.totalPayout.toFixed(2)}
-                        </td>
+                        <td className="px-3 py-1.5 text-right">{r.totalContainers}</td>
+                        <td className="px-3 py-1.5 text-right">{r.totalPieces}</td>
+                        <td className="px-3 py-1.5 text-right">{r.totalMinutes}</td>
+                        <td className="px-3 py-1.5 text-right text-sky-300">{r.avgPPH.toFixed(1)}</td>
+                        <td className="px-3 py-1.5 text-right text-emerald-300">${r.totalPayout.toFixed(2)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -1128,15 +1036,7 @@ export default function ReportsPage() {
   );
 }
 
-function SummaryCard({
-  label,
-  value,
-  hint,
-}: {
-  label: string;
-  value: number;
-  hint: string;
-}) {
+function SummaryCard({ label, value, hint }: { label: string; value: number; hint: string }) {
   return (
     <div className="rounded-2xl bg-slate-900 border border-slate-800 p-4">
       <div className="text-[11px] text-slate-400 mb-1">{label}</div>

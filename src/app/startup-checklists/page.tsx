@@ -93,6 +93,9 @@ export default function StartupChecklistsPage() {
 
   const [records, setRecords] = useState<StartupChecklist[]>([]);
 
+  // ✅ NEW: track which checklist is being edited
+  const [editingId, setEditingId] = useState<string | null>(null);
+
   // Form state
   const [building, setBuilding] = useState<string>(BUILDINGS[0]);
   const [shift, setShift] = useState(SHIFTS[0]);
@@ -217,7 +220,36 @@ export default function StartupChecklistsPage() {
     });
   }, [records, filterBuilding, filterShift, filterStatus]);
 
-  async function handleCreate(e: FormEvent) {
+  // ✅ Reset form & exit edit mode
+  function resetForm() {
+    setEditingId(null);
+    setError(null);
+    setInfo(null);
+
+    const today = new Date().toISOString().slice(0, 10);
+
+    setDate(today);
+    setShift(SHIFTS[0]);
+
+    if (isLead && leadBuilding) {
+      setBuilding(leadBuilding);
+    } else {
+      setBuilding(BUILDINGS[0]);
+    }
+  }
+
+  // ✅ Start editing an existing checklist
+  function startEdit(rec: StartupChecklist) {
+    setEditingId(rec.id);
+    setBuilding(rec.building);
+    setShift(rec.shift);
+    setDate(rec.date);
+    setError(null);
+    setInfo(null);
+  }
+
+  // ✅ Create OR update checklist
+  async function handleSave(e: FormEvent) {
     e.preventDefault();
     if (saving) return;
 
@@ -231,7 +263,11 @@ export default function StartupChecklistsPage() {
 
     // only one per building/shift/date (client-side check)
     const existing = records.find(
-      (r) => r.building === building && r.shift === shift && r.date === date
+      (r) =>
+        r.building === building &&
+        r.shift === shift &&
+        r.date === date &&
+        r.id !== editingId // allow current record to keep same combo
     );
     if (existing) {
       setError(
@@ -243,28 +279,90 @@ export default function StartupChecklistsPage() {
     setSaving(true);
 
     try {
-      const payload = {
-        building,
-        shift,
-        date,
-        items: defaultItems(),
-      };
+      if (editingId) {
+        // 🔄 UPDATE existing checklist (do not touch items)
+        const { error } = await supabase
+          .from("startup_checklists")
+          .update({
+            building,
+            shift,
+            date,
+          })
+          .eq("id", editingId);
 
+        if (error) {
+          console.error("Error updating startup checklist", error);
+          setError("Failed to update startup checklist.");
+          return;
+        }
+
+        await refreshFromSupabase();
+        setInfo("Startup checklist updated.");
+      } else {
+        // ➕ CREATE new checklist
+        const payload = {
+          building,
+          shift,
+          date,
+          items: defaultItems(),
+        };
+
+        const { error } = await supabase
+          .from("startup_checklists")
+          .insert(payload);
+
+        if (error) {
+          console.error("Error inserting startup checklist", error);
+          setError("Failed to create startup checklist.");
+          return;
+        }
+
+        await refreshFromSupabase();
+        setInfo("Startup checklist created. Use the list below to complete steps.");
+      }
+    } catch (e) {
+      console.error("Unexpected error saving checklist", e);
+      setError("Unexpected error saving checklist.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // ✅ Delete a checklist
+  async function handleDelete(id: string) {
+    if (typeof window !== "undefined") {
+      const ok = window.confirm(
+        "Delete this startup checklist? This cannot be undone."
+      );
+      if (!ok) return;
+    }
+
+    setSaving(true);
+    setError(null);
+    setInfo(null);
+
+    try {
       const { error } = await supabase
         .from("startup_checklists")
-        .insert(payload);
+        .delete()
+        .eq("id", id);
 
       if (error) {
-        console.error("Error inserting startup checklist", error);
-        setError("Failed to create startup checklist.");
+        console.error("Error deleting startup checklist", error);
+        setError("Failed to delete startup checklist.");
         return;
       }
 
       await refreshFromSupabase();
-      setInfo("Startup checklist created. Use the list below to complete steps.");
+
+      if (editingId === id) {
+        resetForm();
+      }
+
+      setInfo("Startup checklist deleted.");
     } catch (e) {
-      console.error("Unexpected error creating checklist", e);
-      setError("Unexpected error creating checklist.");
+      console.error("Unexpected error deleting checklist", e);
+      setError("Unexpected error deleting checklist.");
     } finally {
       setSaving(false);
     }
@@ -443,13 +541,24 @@ export default function StartupChecklistsPage() {
 
         {/* Form + list */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Create checklist */}
+          {/* Create / Edit checklist */}
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4">
-            <h2 className="text-sm font-semibold text-slate-100">
-              Create Startup Checklist
-            </h2>
+            <div className="flex items-center justify-between gap-2">
+              <h2 className="text-sm font-semibold text-slate-100">
+                {editingId ? "Edit Startup Checklist" : "Create Startup Checklist"}
+              </h2>
+              {editingId && (
+                <button
+                  type="button"
+                  onClick={resetForm}
+                  className="text-[11px] text-sky-300 hover:underline"
+                >
+                  Clear / New
+                </button>
+              )}
+            </div>
 
-            <form onSubmit={handleCreate} className="space-y-3 text-sm">
+            <form onSubmit={handleSave} className="space-y-3 text-sm">
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs text-slate-300 mb-1">
@@ -507,7 +616,13 @@ export default function StartupChecklistsPage() {
                 disabled={saving}
                 className="mt-2 rounded-lg bg-sky-600 hover:bg-sky-500 disabled:opacity-60 text-sm font-medium text-white px-4 py-2"
               >
-                {saving ? "Creating…" : "Create Checklist"}
+                {saving
+                  ? editingId
+                    ? "Saving…"
+                    : "Creating…"
+                  : editingId
+                  ? "Save Changes"
+                  : "Create Checklist"}
               </button>
 
               {loading && (
@@ -597,7 +712,7 @@ export default function StartupChecklistsPage() {
                       key={r.id}
                       className="border border-slate-800 rounded-xl bg-slate-950 p-3 space-y-2"
                     >
-                      <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-start justify-between gap-2">
                         <div>
                           <div className="text-slate-100 text-sm font-semibold">
                             {r.building} • {r.shift} Shift
@@ -612,15 +727,17 @@ export default function StartupChecklistsPage() {
                           </div>
                         </div>
                         <div className="text-right space-y-1">
-                          <span
-                            className={
-                              status === "Completed"
-                                ? "inline-flex items-center px-2 py-0.5 rounded-full bg-emerald-900/60 text-emerald-200 border border-emerald-700 text-[11px]"
-                                : "inline-flex items-center px-2 py-0.5 rounded-full bg-amber-900/60 text-amber-200 border border-amber-700 text-[11px]"
-                            }
-                          >
-                            {status}
-                          </span>
+                          <div className="flex items-center justify-end gap-2">
+                            <span
+                              className={
+                                status === "Completed"
+                                  ? "inline-flex items-center px-2 py-0.5 rounded-full bg-emerald-900/60 text-emerald-200 border border-emerald-700 text-[11px]"
+                                  : "inline-flex items-center px-2 py-0.5 rounded-full bg-amber-900/60 text-amber-200 border border-amber-700 text-[11px]"
+                              }
+                            >
+                              {status}
+                            </span>
+                          </div>
                           <div className="text-[11px] text-slate-400">
                             Steps: {progress.done}/{progress.total} (
                             {progress.percent}%)
@@ -630,6 +747,23 @@ export default function StartupChecklistsPage() {
                               className="h-full bg-sky-500"
                               style={{ width: `${progress.percent}%` }}
                             />
+                          </div>
+                          <div className="flex items-center justify-end gap-2 pt-1">
+                            <button
+                              type="button"
+                              onClick={() => startEdit(r)}
+                              className="text-[11px] text-sky-300 hover:underline"
+                            >
+                              Edit
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDelete(r.id)}
+                              className="text-[11px] text-rose-300 hover:underline"
+                              disabled={saving}
+                            >
+                              Delete
+                            </button>
                           </div>
                         </div>
                       </div>

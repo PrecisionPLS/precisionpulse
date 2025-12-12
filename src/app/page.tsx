@@ -26,17 +26,59 @@ type ContainerRecord = {
   workers?: ContainerWorker[];
 };
 
+// ✅ Non–Super Admins are only allowed to access these routes
+const NON_SUPER_ALLOWED_ROUTES = new Set<string>([
+  "/",
+  "/containers",
+  "/work-orders",
+  "/training",
+  "/damage-reports",
+  "/startup-checklists",
+  "/chats",
+]);
+
+// ✅ These are blocked routes if typed directly in the URL by non–Super Admin
+const NON_SUPER_BLOCKED_ROUTES = [
+  "/shifts",
+  "/staffing",
+  "/workforce",
+  "/hiring",
+  "/terminations",
+  "/reports",
+  "/admin",
+  "/user-accounts",
+];
+
 export default function Page() {
   const router = useRouter();
   const currentUser = useCurrentUser(); // redirects to /auth if not logged in
 
-  // Role info
+  const isSuperAdmin = currentUser?.accessRole === "Super Admin";
+
+  // ✅ URL Guard (client-side): if non-super admin is on a blocked page, force back to dashboard
+  useEffect(() => {
+    if (!currentUser) return;
+    if (isSuperAdmin) return;
+
+    const path =
+      typeof window !== "undefined" ? window.location.pathname : "/";
+
+    // If they're on any blocked route (or any route not in the allowed list), redirect to /
+    const isBlocked =
+      NON_SUPER_BLOCKED_ROUTES.some(
+        (blocked) => path === blocked || path.startsWith(blocked + "/")
+      ) || !NON_SUPER_ALLOWED_ROUTES.has(path);
+
+    if (isBlocked) {
+      router.replace("/");
+    }
+  }, [currentUser, isSuperAdmin, router]);
+
+  // Role info (leave your logic intact)
   const isLead = currentUser?.accessRole === "Lead";
   const isHQ =
     !!currentUser &&
-    ["Super Admin", "Admin", "HQ"].includes(
-      currentUser.accessRole || ""
-    );
+    ["Super Admin", "Admin", "HQ"].includes(currentUser.accessRole || "");
 
   const userBuilding = currentUser?.building || "";
 
@@ -269,7 +311,6 @@ export default function Page() {
     router.push("/auth");
   }
 
-  // While useCurrentUser is redirecting, don't flash the dashboard
   if (!currentUser) {
     return (
       <div className="min-h-screen bg-slate-950 text-slate-400 flex items-center justify-center text-sm">
@@ -302,91 +343,101 @@ export default function Page() {
             >
               Dashboard
             </Link>
+
             <Link
               href="/containers"
               className="block px-3 py-2 rounded-lg text-slate-300 hover:bg-slate-800 hover:text-sky-200 transition-colors"
             >
               Containers
             </Link>
+
             <Link
               href="/work-orders"
               className="block px-3 py-2 rounded-lg text-slate-300 hover:bg-slate-800 hover:text-sky-200 transition-colors"
             >
               Work Orders
             </Link>
-            <Link
-              href="/shifts"
-              className="block px-3 py-2 rounded-lg text-slate-300 hover:bg-slate-800 hover:text-sky-200 transition-colors"
-            >
-              Shifts
-            </Link>
-            <Link
-              href="/staffing"
-              className="block px-3 py-2 rounded-lg text-slate-300 hover:bg-slate-800 hover:text-sky-200 transition-colors"
-            >
-              Staffing Coverage
-            </Link>
-            <Link
-              href="/workforce"
-              className="block px-3 py-2 rounded-lg text-slate-300 hover:bg-slate-800 hover:text-sky-200 transition-colors"
-            >
-              Workforce
-            </Link>
-            <Link
-              href="/hiring"
-              className="block px-3 py-2 rounded-lg text-slate-300 hover:bg-slate-800 hover:text-sky-200 transition-colors"
-            >
-              Hiring
-            </Link>
+
             <Link
               href="/training"
               className="block px-3 py-2 rounded-lg text-slate-300 hover:bg-slate-800 hover:text-sky-200 transition-colors"
             >
               Training
             </Link>
-            <Link
-              href="/terminations"
-              className="block px-3 py-2 rounded-lg text-slate-300 hover:bg-slate-800 hover:text-sky-200 transition-colors"
-            >
-              Terminations
-            </Link>
+
             <Link
               href="/damage-reports"
               className="block px-3 py-2 rounded-lg text-slate-300 hover:bg-slate-800 hover:text-sky-200 transition-colors"
             >
               Damage Reports
             </Link>
+
             <Link
               href="/startup-checklists"
               className="block px-3 py-2 rounded-lg text-slate-300 hover:bg-slate-800 hover:text-sky-200 transition-colors"
             >
               Startup Meetings
             </Link>
+
             <Link
               href="/chats"
               className="block px-3 py-2 rounded-lg text-slate-300 hover:bg-slate-800 hover:text-sky-200 transition-colors"
             >
               Chats
             </Link>
-            <Link
-              href="/reports"
-              className="block px-3 py-2 rounded-lg text-slate-300 hover:bg-slate-800 hover:text-sky-200 transition-colors"
-            >
-              Reports
-            </Link>
-            <Link
-              href="/admin"
-              className="block px-3 py-2 rounded-lg text-slate-300 hover:bg-slate-800 hover:text-sky-200 transition-colors"
-            >
-              Admin / Backup
-            </Link>
-            {currentUser.accessRole === "Super Admin" && (
-              <Link
-                href="/user-accounts"
-                className="block px-3 py-2 rounded-lg text-slate-200 hover:bg-slate-800 hover:text-sky-200 transition-colors border border-slate-700/80"
-              >
-                User Accounts
-              </Link>
+
+            {/* ✅ Super Admin ONLY sees everything else exactly like before */}
+            {isSuperAdmin && (
+              <>
+                <Link
+                  href="/shifts"
+                  className="block px-3 py-2 rounded-lg text-slate-300 hover:bg-slate-800 hover:text-sky-200 transition-colors"
+                >
+                  Shifts
+                </Link>
+                <Link
+                  href="/staffing"
+                  className="block px-3 py-2 rounded-lg text-slate-300 hover:bg-slate-800 hover:text-sky-200 transition-colors"
+                >
+                  Staffing Coverage
+                </Link>
+                <Link
+                  href="/workforce"
+                  className="block px-3 py-2 rounded-lg text-slate-300 hover:bg-slate-800 hover:text-sky-200 transition-colors"
+                >
+                  Workforce
+                </Link>
+                <Link
+                  href="/hiring"
+                  className="block px-3 py-2 rounded-lg text-slate-300 hover:bg-slate-800 hover:text-sky-200 transition-colors"
+                >
+                  Hiring
+                </Link>
+                <Link
+                  href="/terminations"
+                  className="block px-3 py-2 rounded-lg text-slate-300 hover:bg-slate-800 hover:text-sky-200 transition-colors"
+                >
+                  Terminations
+                </Link>
+                <Link
+                  href="/reports"
+                  className="block px-3 py-2 rounded-lg text-slate-300 hover:bg-slate-800 hover:text-sky-200 transition-colors"
+                >
+                  Reports
+                </Link>
+                <Link
+                  href="/admin"
+                  className="block px-3 py-2 rounded-lg text-slate-300 hover:bg-slate-800 hover:text-sky-200 transition-colors"
+                >
+                  Admin / Backup
+                </Link>
+                <Link
+                  href="/user-accounts"
+                  className="block px-3 py-2 rounded-lg text-slate-200 hover:bg-slate-800 hover:text-sky-200 transition-colors border border-slate-700/80"
+                >
+                  User Accounts
+                </Link>
+              </>
             )}
           </nav>
         </aside>
@@ -400,8 +451,8 @@ export default function Page() {
                 Precision Pulse Dashboard
               </h1>
               <p className="text-sm text-slate-400">
-                Live overview of workforce, containers, damage, and HR
-                workflows across{" "}
+                Live overview of workforce, containers, damage, and HR workflows
+                across{" "}
                 <span className="font-semibold text-sky-300">
                   {buildingLabel}
                 </span>
@@ -417,6 +468,7 @@ export default function Page() {
                 </p>
               )}
             </div>
+
             <div className="flex flex-col items-end gap-2">
               <div className="flex items-center gap-3">
                 <div className="text-right">
@@ -429,8 +481,7 @@ export default function Page() {
                     )}
                   </div>
                   <div className="text-[10px] text-slate-500">
-                    {currentUser.email} ·{" "}
-                    {currentUser.building || "No building set"}
+                    {currentUser.email} · {currentUser.building || "No building set"}
                   </div>
                 </div>
                 <button
@@ -440,25 +491,19 @@ export default function Page() {
                   Logout
                 </button>
               </div>
+
               <div className="flex items-center gap-2">
-                <span className="text-[11px] text-slate-500">
-                  View:
-                </span>
+                <span className="text-[11px] text-slate-500">View:</span>
                 <select
                   className="rounded-lg bg-slate-900 border border-slate-700 px-3 py-1.5 text-xs text-slate-50 shadow-sm shadow-slate-900/50"
                   value={buildingFilter}
                   onChange={(e) => setBuildingFilter(e.target.value)}
-                  // Non-HQ with a building are locked to that building
                   disabled={!isHQ && !!userBuilding}
                 >
-                  {/* Only HQ/Admin/Super Admin can see All Buildings */}
                   {isHQ && <option value="ALL">All Buildings</option>}
 
                   {BUILDINGS.map((b) => {
-                    // Non-HQ: only show their own building in the list
-                    if (!isHQ && userBuilding && b !== userBuilding) {
-                      return null;
-                    }
+                    if (!isHQ && userBuilding && b !== userBuilding) return null;
                     return (
                       <option key={b} value={b}>
                         {b}
@@ -466,69 +511,50 @@ export default function Page() {
                     );
                   })}
                 </select>
+
                 <span className="text-[11px] text-slate-500">
-                  Today:{" "}
-                  <span className="text-slate-200 font-mono">
-                    {todayStr}
-                  </span>
+                  Today: <span className="text-slate-200 font-mono">{todayStr}</span>
                 </span>
               </div>
             </div>
           </div>
 
-          {/* Quick Actions row */}
+          {/* Quick Actions row (restricted for non-super) */}
           <div className="flex flex-wrap gap-2 text-xs">
-            <QuickLink
-              href="/containers"
-              label="Containers"
-              sub="Enter volume & lumpers"
-            />
-            <QuickLink
-              href="/staffing"
-              label="Staffing Coverage"
-              sub="Required vs actual"
-            />
-            <QuickLink
-              href="/reports"
-              label="Reports"
-              sub="Pay · PPH · Leaders"
-            />
-            <QuickLink
-              href="/workforce"
-              label="Workforce"
-              sub="Roster & roles"
-            />
-            <QuickLink
-              href="/training"
-              label="Training"
-              sub="Compliance matrix"
-            />
+            <QuickLink href="/containers" label="Containers" sub="Enter volume & lumpers" />
+            {isSuperAdmin && (
+              <>
+                <QuickLink href="/staffing" label="Staffing Coverage" sub="Required vs actual" />
+                <QuickLink href="/reports" label="Reports" sub="Pay · PPH · Leaders" />
+                <QuickLink href="/workforce" label="Workforce" sub="Roster & roles" />
+              </>
+            )}
+            <QuickLink href="/training" label="Training" sub="Compliance matrix" />
           </div>
 
           {/* Top KPI row */}
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
             <CardKpi>
-              <div className="text-xs text-slate-400 mb-1">
-                Active Workforce
-              </div>
+              <div className="text-xs text-slate-400 mb-1">Active Workforce</div>
               <div className="text-2xl font-semibold text-emerald-300">
                 {metrics.activeWorkers}
               </div>
               <div className="text-[11px] text-slate-500 mt-1">
                 Total workers: {metrics.totalWorkers}
               </div>
-              <Link
-                href="/workforce"
-                className="mt-3 inline-block text-[11px] text-sky-300 hover:underline"
-              >
-                View Workforce →
-              </Link>
+              {/* Only super admin can navigate to workforce */}
+              {isSuperAdmin && (
+                <Link
+                  href="/workforce"
+                  className="mt-3 inline-block text-[11px] text-sky-300 hover:underline"
+                >
+                  View Workforce →
+                </Link>
+              )}
             </CardKpi>
 
             <CardKpi>
-              <div className="text-xs text-slate-400 mb-1">
-                Open Damage Reports
-              </div>
+              <div className="text-xs text-slate-400 mb-1">Open Damage Reports</div>
               <div className="text-2xl font-semibold text-amber-300">
                 {metrics.openDamageReports}
               </div>
@@ -544,27 +570,25 @@ export default function Page() {
             </CardKpi>
 
             <CardKpi>
-              <div className="text-xs text-slate-400 mb-1">
-                Terminations In Progress
-              </div>
+              <div className="text-xs text-slate-400 mb-1">Terminations In Progress</div>
               <div className="text-2xl font-semibold text-rose-300">
                 {metrics.termInProgress}
               </div>
               <div className="text-[11px] text-slate-500 mt-1">
                 Completed: {metrics.termCompleted}
               </div>
-              <Link
-                href="/terminations"
-                className="mt-3 inline-block text-[11px] text-sky-300 hover:underline"
-              >
-                View Terminations →
-              </Link>
+              {isSuperAdmin && (
+                <Link
+                  href="/terminations"
+                  className="mt-3 inline-block text-[11px] text-sky-300 hover:underline"
+                >
+                  View Terminations →
+                </Link>
+              )}
             </CardKpi>
 
             <CardKpi>
-              <div className="text-xs text-slate-400 mb-1">
-                Chat Activity Today
-              </div>
+              <div className="text-xs text-slate-400 mb-1">Chat Activity Today</div>
               <div className="text-2xl font-semibold text-sky-300">
                 {metrics.chatsTodayCount}
               </div>
@@ -582,7 +606,6 @@ export default function Page() {
 
           {/* Second row */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            {/* Operations snapshot */}
             <CardPanel className="space-y-4">
               <div className="flex items-center justify-between">
                 <h2 className="text-sm font-semibold text-slate-100">
@@ -595,9 +618,7 @@ export default function Page() {
 
               <div className="grid grid-cols-3 gap-3 text-sm">
                 <CardMini>
-                  <div className="text-[11px] text-slate-400 mb-1">
-                    Total Containers
-                  </div>
+                  <div className="text-[11px] text-slate-400 mb-1">Total Containers</div>
                   <div className="text-lg font-semibold text-slate-100">
                     {metrics.containersTotal}
                   </div>
@@ -608,10 +629,9 @@ export default function Page() {
                     Go to Containers →
                   </Link>
                 </CardMini>
+
                 <CardMini>
-                  <div className="text-[11px] text-slate-400 mb-1">
-                    Work Orders (Open)
-                  </div>
+                  <div className="text-[11px] text-slate-400 mb-1">Work Orders (Open)</div>
                   <div className="text-lg font-semibold text-emerald-300">
                     {metrics.workOrdersOpen}
                   </div>
@@ -625,18 +645,15 @@ export default function Page() {
                     Go to Work Orders →
                   </Link>
                 </CardMini>
+
                 <CardMini>
-                  <div className="text-[11px] text-slate-400 mb-1">
-                    Containers Today
-                  </div>
+                  <div className="text-[11px] text-slate-400 mb-1">Containers Today</div>
                   <div className="text-lg font-semibold text-sky-300">
                     {metrics.containersToday}
                   </div>
                   <div className="text-[11px] text-slate-500">
                     Pieces today:{" "}
-                    <span className="text-slate-100">
-                      {metrics.piecesToday}
-                    </span>
+                    <span className="text-slate-100">{metrics.piecesToday}</span>
                   </div>
                 </CardMini>
               </div>
@@ -644,42 +661,44 @@ export default function Page() {
               <CardMini>
                 <div className="flex items-center justify-between">
                   <div>
-                    <div className="text-slate-300 mb-1 text-xs">
-                      Throughput (Today)
-                    </div>
+                    <div className="text-slate-300 mb-1 text-xs">Throughput (Today)</div>
                     <div className="text-[11px] text-slate-400">
                       PPH:{" "}
                       <span className="text-sky-300 font-semibold">
                         {metrics.pphToday.toFixed(1)}
                       </span>{" "}
                       · Minutes logged:{" "}
-                      <span className="text-slate-100">
-                        {metrics.minutesToday}
-                      </span>
+                      <span className="text-slate-100">{metrics.minutesToday}</span>
                     </div>
                   </div>
-                  <Link
-                    href="/reports"
-                    className="text-[11px] text-sky-300 hover:underline"
-                  >
-                    See details →
-                  </Link>
+
+                  {/* Only super admin can click reports */}
+                  {isSuperAdmin ? (
+                    <Link
+                      href="/reports"
+                      className="text-[11px] text-sky-300 hover:underline"
+                    >
+                      See details →
+                    </Link>
+                  ) : (
+                    <Link
+                      href="/"
+                      className="text-[11px] text-slate-500 hover:text-slate-300"
+                    >
+                      See details →
+                    </Link>
+                  )}
                 </div>
               </CardMini>
 
               <CardMini>
-                <div className="text-slate-300 mb-1 text-xs">
-                  Startup Meetings Today
-                </div>
+                <div className="text-slate-300 mb-1 text-xs">Startup Meetings Today</div>
                 <div className="flex items-center justify-between">
                   <div>
                     <div className="text-slate-100 text-sm font-semibold">
-                      {metrics.startupTodayCompleted}/
-                      {metrics.startupTodayTotal} completed
+                      {metrics.startupTodayCompleted}/{metrics.startupTodayTotal} completed
                     </div>
-                    <div className="text-[11px] text-slate-500">
-                      {buildingLabel}
-                    </div>
+                    <div className="text-[11px] text-slate-500">{buildingLabel}</div>
                   </div>
                   <Link
                     href="/startup-checklists"
@@ -691,7 +710,6 @@ export default function Page() {
               </CardMini>
             </CardPanel>
 
-            {/* People & Compliance */}
             <CardPanel className="space-y-4 lg:col-span-2">
               <div className="flex items-center justify-between">
                 <h2 className="text-sm font-semibold text-slate-100">
@@ -704,60 +722,48 @@ export default function Page() {
 
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
                 <CardMini>
-                  <div className="text-slate-300 mb-1">
-                    Workforce Overview
-                  </div>
+                  <div className="text-slate-300 mb-1">Workforce Overview</div>
                   <div className="text-slate-400">
                     Active:{" "}
-                    <span className="text-emerald-300">
-                      {metrics.activeWorkers}
-                    </span>
+                    <span className="text-emerald-300">{metrics.activeWorkers}</span>
                   </div>
                   <div className="text-slate-400">
                     Total:{" "}
-                    <span className="text-slate-100">
-                      {metrics.totalWorkers}
-                    </span>
+                    <span className="text-slate-100">{metrics.totalWorkers}</span>
                   </div>
-                  <Link
-                    href="/workforce"
-                    className="mt-2 inline-block text-[11px] text-sky-300 hover:underline"
-                  >
-                    Manage Workforce →
-                  </Link>
+                  {isSuperAdmin && (
+                    <Link
+                      href="/workforce"
+                      className="mt-2 inline-block text-[11px] text-sky-300 hover:underline"
+                    >
+                      Manage Workforce →
+                    </Link>
+                  )}
                 </CardMini>
 
                 <CardMini>
-                  <div className="text-slate-300 mb-1">
-                    Termination Workflows
-                  </div>
+                  <div className="text-slate-300 mb-1">Termination Workflows</div>
                   <div className="text-slate-400">
                     In Progress:{" "}
-                    <span className="text-rose-300">
-                      {metrics.termInProgress}
-                    </span>
+                    <span className="text-rose-300">{metrics.termInProgress}</span>
                   </div>
                   <div className="text-slate-400">
                     Completed:{" "}
-                    <span className="text-emerald-300">
-                      {metrics.termCompleted}
-                    </span>
+                    <span className="text-emerald-300">{metrics.termCompleted}</span>
                   </div>
-                  <Link
-                    href="/terminations"
-                    className="mt-2 inline-block text-[11px] text-sky-300 hover:underline"
-                  >
-                    View Terminations →
-                  </Link>
+                  {isSuperAdmin && (
+                    <Link
+                      href="/terminations"
+                      className="mt-2 inline-block text-[11px] text-sky-300 hover:underline"
+                    >
+                      View Terminations →
+                    </Link>
+                  )}
                 </CardMini>
 
                 <CardMini>
-                  <div className="text-slate-300 mb-1">
-                    Training & Readiness
-                  </div>
-                  <div className="text-slate-400">
-                    (Hook to Training data later)
-                  </div>
+                  <div className="text-slate-300 mb-1">Training & Readiness</div>
+                  <div className="text-slate-400">(Hook to Training data later)</div>
                   <Link
                     href="/training"
                     className="mt-2 inline-block text-[11px] text-sky-300 hover:underline"
@@ -770,22 +776,14 @@ export default function Page() {
               <CardMini>
                 <div className="flex items-center justify-between">
                   <div>
-                    <div className="text-slate-300 mb-1">
-                      Quality & Damage
-                    </div>
+                    <div className="text-slate-300 mb-1">Quality & Damage</div>
                     <div className="text-slate-400">
                       Open/Review:{" "}
-                      <span className="text-amber-300">
-                        {metrics.openDamageReports}
-                      </span>{" "}
+                      <span className="text-amber-300">{metrics.openDamageReports}</span>{" "}
                       · Total:{" "}
-                      <span className="text-slate-100">
-                        {metrics.totalDamageReports}
-                      </span>{" "}
+                      <span className="text-slate-100">{metrics.totalDamageReports}</span>{" "}
                       · Avg Damage:{" "}
-                      <span className="text-amber-300">
-                        {metrics.avgDamagePercent}%
-                      </span>
+                      <span className="text-amber-300">{metrics.avgDamagePercent}%</span>
                     </div>
                   </div>
                   <Link

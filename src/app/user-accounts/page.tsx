@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
+import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 import { useCurrentUser } from "@/lib/useCurrentUser";
 import { BUILDINGS } from "@/lib/buildings"; // ✅ shared buildings
@@ -34,7 +35,18 @@ type UserAccountRow = {
 const USER_ACCOUNTS_TABLE = "user_accounts";
 
 export default function UserAccountsPage() {
+  const router = useRouter();
   const currentUser = useCurrentUser(); // redirect handled inside hook
+
+  // Only Super Admins can access this page
+  const isSuperAdmin = currentUser?.accessRole === "Super Admin";
+
+  // ✅ HARD REDIRECT: non-super admins get sent back to dashboard immediately
+  useEffect(() => {
+    if (!currentUser) return;
+    if (isSuperAdmin) return;
+    router.replace("/");
+  }, [currentUser, isSuperAdmin, router]);
 
   const [users, setUsers] = useState<UserAccountRow[]>([]);
   const [loading, setLoading] = useState(false);
@@ -59,9 +71,6 @@ export default function UserAccountsPage() {
   const [filterBuilding, setFilterBuilding] = useState<string>("ALL");
   const [filterRole, setFilterRole] = useState<string>("ALL");
   const [search, setSearch] = useState<string>("");
-
-  // Only Super Admins can access this page
-  const isSuperAdmin = currentUser?.accessRole === "Super Admin";
 
   useEffect(() => {
     if (!currentUser) return;
@@ -344,18 +353,14 @@ export default function UserAccountsPage() {
         const email = u.email?.toLowerCase() || "";
         const name = u.name?.toLowerCase() || "";
         const building = u.building?.toLowerCase() || "";
-        return (
-          email.includes(q) ||
-          name.includes(q) ||
-          building.includes(q)
-        );
+        return email.includes(q) || name.includes(q) || building.includes(q);
       });
     }
 
     return list;
   }, [users, filterBuilding, filterRole, search]);
 
-  // Route protection
+  // Route protection UI (while redirect happens)
   if (!currentUser) {
     return (
       <div className="min-h-screen bg-slate-950 text-slate-400 flex items-center justify-center text-sm">
@@ -366,25 +371,8 @@ export default function UserAccountsPage() {
 
   if (!isSuperAdmin) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-950 to-slate-900 text-slate-50 flex flex-col items-center justify-center p-6">
-        <div className="max-w-md text-center space-y-3 text-sm">
-          <h1 className="text-xl font-semibold text-slate-50">
-            Restricted Area
-          </h1>
-          <p className="text-slate-400">
-            Only{" "}
-            <span className="font-semibold text-emerald-300">
-              Super Admins
-            </span>{" "}
-            can manage user accounts and access levels.
-          </p>
-          <Link
-            href="/"
-            className="inline-flex items-center px-3 py-1.5 rounded-full border border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800 text-xs"
-          >
-            ← Back to Dashboard
-          </Link>
-        </div>
+      <div className="min-h-screen bg-slate-950 text-slate-400 flex items-center justify-center text-sm">
+        Redirecting to dashboard…
       </div>
     );
   }
@@ -415,10 +403,8 @@ export default function UserAccountsPage() {
           <div className="flex flex-col items-end gap-2 text-xs">
             <div className="text-right text-slate-300">
               Signed in as{" "}
-              <span className="font-semibold">
-                {currentUser.email}
-              </span>{" "}
-              ({currentUser.accessRole})
+              <span className="font-semibold">{currentUser.email}</span> (
+              {currentUser.accessRole})
             </div>
             <Link
               href="/"
@@ -512,9 +498,7 @@ export default function UserAccountsPage() {
                   <select
                     className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
                     value={role}
-                    onChange={(e) =>
-                      setRole(e.target.value as AccessRole)
-                    }
+                    onChange={(e) => setRole(e.target.value as AccessRole)}
                   >
                     {ACCESS_ROLES.map((r) => (
                       <option key={r} value={r}>
@@ -523,8 +507,8 @@ export default function UserAccountsPage() {
                     ))}
                   </select>
                   <p className="mt-1 text-[10px] text-slate-500">
-                    Leads see only their building; HQ/Admin/Super Admin
-                    see all buildings.
+                    Leads see only their building; HQ/Admin/Super Admin see all
+                    buildings.
                   </p>
                 </div>
               </div>
@@ -537,10 +521,7 @@ export default function UserAccountsPage() {
                   checked={active}
                   onChange={(e) => setActive(e.target.checked)}
                 />
-                <label
-                  htmlFor="active"
-                  className="text-[11px] text-slate-400"
-                >
+                <label htmlFor="active" className="text-[11px] text-slate-400">
                   Active account
                 </label>
               </div>
@@ -565,9 +546,7 @@ export default function UserAccountsPage() {
                   roles & buildings in the internal table
                 </span>
                 . Use{" "}
-                <span className="font-semibold">
-                  "Create Auth" & "Send Reset"
-                </span>{" "}
+                <span className="font-semibold">"Create Auth" & "Send Reset"</span>{" "}
                 to manage their actual Supabase login.
               </p>
             </form>
@@ -607,9 +586,7 @@ export default function UserAccountsPage() {
                   <select
                     className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
                     value={filterBuilding}
-                    onChange={(e) =>
-                      setFilterBuilding(e.target.value)
-                    }
+                    onChange={(e) => setFilterBuilding(e.target.value)}
                   >
                     <option value="ALL">All Buildings</option>
                     {BUILDINGS.map((b) => (
@@ -619,6 +596,7 @@ export default function UserAccountsPage() {
                     ))}
                   </select>
                 </div>
+
                 <div>
                   <label className="block text-[11px] text-slate-400 mb-1">
                     Role
@@ -636,6 +614,7 @@ export default function UserAccountsPage() {
                     ))}
                   </select>
                 </div>
+
                 <div className="md:col-span-2">
                   <label className="block text-[11px] text-slate-400 mb-1">
                     Search
@@ -739,9 +718,7 @@ export default function UserAccountsPage() {
                               </span>
                             </td>
                             <td className="px-3 py-2 text-slate-300">
-                              {u.created_at
-                                ? u.created_at.slice(0, 10)
-                                : "—"}
+                              {u.created_at ? u.created_at.slice(0, 10) : "—"}
                             </td>
                             <td className="px-3 py-2 text-right">
                               <div className="inline-flex flex-wrap gap-2 justify-end">
@@ -765,9 +742,7 @@ export default function UserAccountsPage() {
                                   disabled={loadingAuth}
                                   className="text-[11px] text-emerald-300 hover:underline disabled:opacity-60"
                                 >
-                                  {loadingAuth
-                                    ? "Creating Auth…"
-                                    : "Create Auth"}
+                                  {loadingAuth ? "Creating Auth…" : "Create Auth"}
                                 </button>
                                 <button
                                   type="button"
@@ -775,9 +750,7 @@ export default function UserAccountsPage() {
                                   disabled={loadingReset}
                                   className="text-[11px] text-sky-200 hover:underline disabled:opacity-60"
                                 >
-                                  {loadingReset
-                                    ? "Sending Reset…"
-                                    : "Send Reset"}
+                                  {loadingReset ? "Sending Reset…" : "Send Reset"}
                                 </button>
                                 <button
                                   type="button"
