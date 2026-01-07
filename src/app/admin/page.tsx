@@ -22,7 +22,7 @@ const SUPABASE_TABLES = [
 type BackupSnapshot = {
   createdAt: string;
   createdBy: string | null;
-  tables: Record<string, any[]>;
+  tables: Record<string, Record<string, unknown>[]>;
 };
 
 export default function AdminPage() {
@@ -92,8 +92,8 @@ export default function AdminPage() {
     setBackupLoading(true);
 
     try {
-      const tablesData: Record<string, any[]> = {};
-      let errorTables: string[] = [];
+      const tablesData: Record<string, Record<string, unknown>[]> = {};
+      const errorTables: string[] = [];
 
       for (const table of SUPABASE_TABLES) {
         const { data, error } = await supabase.from(table).select("*");
@@ -135,7 +135,7 @@ export default function AdminPage() {
       } else {
         setBackupStatus("Backup completed and downloaded successfully.");
       }
-    } catch (e: any) {
+    } catch (e: unknown) {
       console.error("Backup error", e);
       setBackupError("Unexpected error while creating backup file.");
     } finally {
@@ -204,7 +204,7 @@ export default function AdminPage() {
           )}.`
         );
       }
-    } catch (e: any) {
+    } catch (e: unknown) {
       console.error("Restore error", e);
       setRestoreError(
         "Unexpected error while restoring from backup file."

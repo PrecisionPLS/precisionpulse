@@ -2,7 +2,7 @@
 
 import { supabase } from "@/lib/supabaseClient";
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useMemo, useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useCurrentUser } from "@/lib/useCurrentUser";
 import { BUILDINGS } from "@/lib/buildings";
@@ -15,16 +15,8 @@ const CHATS_KEY = "precisionpulse_chats";
 const CONTAINERS_KEY = "precisionpulse_containers";
 const WORK_ORDERS_KEY = "precisionpulse_work_orders";
 
-type ContainerWorker = {
-  minutesWorked?: number;
-};
-
-type ContainerRecord = {
-  building?: string;
-  createdAt?: string;
-  piecesTotal?: number;
-  workers?: ContainerWorker[];
-};
+// LocalStorage row types (kept flexible but NOT `any`)
+type LocalRow = Record<string, unknown>;
 
 // ✅ Non–Super Admins are only allowed to access these routes
 const NON_SUPER_ALLOWED_ROUTES = new Set<string>([
@@ -49,6 +41,57 @@ const NON_SUPER_BLOCKED_ROUTES = [
   "/user-accounts",
 ];
 
+function safeReadArray(key: string): LocalRow[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? (parsed as LocalRow[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function getObjBuilding(obj: LocalRow): string | undefined {
+  const b =
+    (typeof obj.building === "string" ? obj.building : undefined) ||
+    (typeof obj.assignedBuilding === "string"
+      ? obj.assignedBuilding
+      : undefined) ||
+    (typeof obj.homeBuilding === "string" ? obj.homeBuilding : undefined) ||
+    (typeof obj.buildingCode === "string" ? obj.buildingCode : undefined);
+  return b;
+}
+
+function getString(obj: LocalRow, key: string): string {
+  const v = obj[key];
+  return typeof v === "string" ? v : "";
+}
+
+function getNumber(obj: LocalRow, key: string): number {
+  const v = obj[key];
+  return typeof v === "number" ? v : 0;
+}
+
+function getBoolRecordValues(obj: unknown): boolean[] {
+  if (!obj || typeof obj !== "object") return [];
+  return Object.values(obj as Record<string, unknown>).filter(
+    (v): v is boolean => typeof v === "boolean"
+  );
+}
+
+function getWorkersMinutes(row: LocalRow): number {
+  const workersRaw = row.workers;
+  if (!Array.isArray(workersRaw)) return 0;
+
+  return workersRaw.reduce<number>((sum, w) => {
+    if (!w || typeof w !== "object") return sum;
+    const mw = (w as Record<string, unknown>).minutesWorked;
+    return sum + (typeof mw === "number" ? mw : 0);
+  }, 0);
+}
+
 export default function Page() {
   const router = useRouter();
   const currentUser = useCurrentUser(); // redirects to /auth if not logged in
@@ -63,15 +106,12 @@ export default function Page() {
     const path =
       typeof window !== "undefined" ? window.location.pathname : "/";
 
-    // If they're on any blocked route (or any route not in the allowed list), redirect to /
     const isBlocked =
       NON_SUPER_BLOCKED_ROUTES.some(
         (blocked) => path === blocked || path.startsWith(blocked + "/")
       ) || !NON_SUPER_ALLOWED_ROUTES.has(path);
 
-    if (isBlocked) {
-      router.replace("/");
-    }
+    if (isBlocked) router.replace("/");
   }, [currentUser, isSuperAdmin, router]);
 
   // Role info (leave your logic intact)
@@ -82,96 +122,66 @@ export default function Page() {
 
   const userBuilding = currentUser?.building || "";
 
-  // Building filter:
-  // - HQ/Admin/Super Admin => can use "ALL" and switch buildings
-  // - Everyone else (Leads, Workers, etc.) => locked to their building (if set)
-  const [buildingFilter, setBuildingFilter] = useState<string>(
-    isHQ ? "ALL" : userBuilding || "ALL"
+  // ✅ Remove set-state-in-effect lint by not syncing buildingFilter in an effect.
+  // If role/building changes at runtime, the dropdown still works (HQ can switch).
+  // Non-HQ is locked via disabled select + options filtering.
+  const [buildingFilter, setBuildingFilter] = useState<string>(() => {
+    return isHQ ? "ALL" : userBuilding || "ALL";
+  });
+
+  // ✅ Initialize from localStorage via lazy initializers (no setState in effects)
+  const [workforce, setWorkforce] = useState<LocalRow[]>(() =>
+    safeReadArray(WORKFORCE_KEY)
+  );
+  const [terminations, setTerminations] = useState<LocalRow[]>(() =>
+    safeReadArray(TERMINATIONS_KEY)
+  );
+  const [damageReports, setDamageReports] = useState<LocalRow[]>(() =>
+    safeReadArray(DAMAGE_KEY)
+  );
+  const [startupChecklists, setStartupChecklists] = useState<LocalRow[]>(() =>
+    safeReadArray(STARTUP_KEY)
+  );
+  const [chats, setChats] = useState<LocalRow[]>(() => safeReadArray(CHATS_KEY));
+  const [containers, setContainers] = useState<LocalRow[]>(() =>
+    safeReadArray(CONTAINERS_KEY)
+  );
+  const [workOrders, setWorkOrders] = useState<LocalRow[]>(() =>
+    safeReadArray(WORK_ORDERS_KEY)
   );
 
-  useEffect(() => {
-    if (!currentUser) return;
-
-    if (isHQ) {
-      setBuildingFilter((prev) => (prev ? prev : "ALL"));
-    } else if (userBuilding) {
-      setBuildingFilter(userBuilding);
-    }
-  }, [currentUser, isHQ, userBuilding]);
-
-  const [workforce, setWorkforce] = useState<any[]>([]);
-  const [terminations, setTerminations] = useState<any[]>([]);
-  const [damageReports, setDamageReports] = useState<any[]>([]);
-  const [startupChecklists, setStartupChecklists] = useState<any[]>([]);
-  const [chats, setChats] = useState<any[]>([]);
-  const [containers, setContainers] = useState<any[]>([]);
-  const [workOrders, setWorkOrders] = useState<any[]>([]);
-
-  // Load localStorage data
+  // Optional: keep state in sync if other tabs/pages update localStorage.
+  // This is a subscription to an external system (storage event) ✅
   useEffect(() => {
     if (typeof window === "undefined") return;
 
-    try {
-      const raw = window.localStorage.getItem(WORKFORCE_KEY);
-      if (raw) setWorkforce(JSON.parse(raw));
-    } catch (e) {
-      console.error("Failed to load workforce", e);
+    function onStorage(e: StorageEvent) {
+      if (!e.key) return;
+      if (e.key === WORKFORCE_KEY) setWorkforce(safeReadArray(WORKFORCE_KEY));
+      if (e.key === TERMINATIONS_KEY)
+        setTerminations(safeReadArray(TERMINATIONS_KEY));
+      if (e.key === DAMAGE_KEY) setDamageReports(safeReadArray(DAMAGE_KEY));
+      if (e.key === STARTUP_KEY)
+        setStartupChecklists(safeReadArray(STARTUP_KEY));
+      if (e.key === CHATS_KEY) setChats(safeReadArray(CHATS_KEY));
+      if (e.key === CONTAINERS_KEY) setContainers(safeReadArray(CONTAINERS_KEY));
+      if (e.key === WORK_ORDERS_KEY) setWorkOrders(safeReadArray(WORK_ORDERS_KEY));
     }
 
-    try {
-      const raw = window.localStorage.getItem(TERMINATIONS_KEY);
-      if (raw) setTerminations(JSON.parse(raw));
-    } catch (e) {
-      console.error("Failed to load terminations", e);
-    }
-
-    try {
-      const raw = window.localStorage.getItem(DAMAGE_KEY);
-      if (raw) setDamageReports(JSON.parse(raw));
-    } catch (e) {
-      console.error("Failed to load damage reports", e);
-    }
-
-    try {
-      const raw = window.localStorage.getItem(STARTUP_KEY);
-      if (raw) setStartupChecklists(JSON.parse(raw));
-    } catch (e) {
-      console.error("Failed to load startup checklists", e);
-    }
-
-    try {
-      const raw = window.localStorage.getItem(CHATS_KEY);
-      if (raw) setChats(JSON.parse(raw));
-    } catch (e) {
-      console.error("Failed to load chats", e);
-    }
-
-    try {
-      const raw = window.localStorage.getItem(CONTAINERS_KEY);
-      if (raw) setContainers(JSON.parse(raw));
-    } catch (e) {
-      console.error("Failed to load containers", e);
-    }
-
-    try {
-      const raw = window.localStorage.getItem(WORK_ORDERS_KEY);
-      if (raw) setWorkOrders(JSON.parse(raw));
-    } catch (e) {
-      console.error("Failed to load work orders", e);
-    }
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
   }, []);
 
   const todayStr = new Date().toISOString().slice(0, 10);
 
-  function matchesBuilding(obj: any): boolean {
-    if (buildingFilter === "ALL") return true;
-    const b =
-      obj?.building ||
-      obj?.assignedBuilding ||
-      obj?.homeBuilding ||
-      obj?.buildingCode;
-    return b === buildingFilter;
-  }
+  const matchesBuilding = useCallback(
+    (obj: LocalRow): boolean => {
+      if (buildingFilter === "ALL") return true;
+      const b = getObjBuilding(obj);
+      return b === buildingFilter;
+    },
+    [buildingFilter]
+  );
 
   const metrics = useMemo(() => {
     const wf = workforce.filter(matchesBuilding);
@@ -183,17 +193,15 @@ export default function Page() {
     const wo = workOrders.filter(matchesBuilding);
 
     const totalWorkers = wf.length;
-    const activeWorkers = wf.filter((w) => w.status === "Active").length;
+    const activeWorkers = wf.filter((w) => getString(w, "status") === "Active")
+      .length;
 
-    function checklistProgress(c: any) {
-      if (!c) return { total: 0, done: 0 };
-      const vals = Object.values(c) as boolean[];
-      const total = vals.length;
-      const done = vals.filter(Boolean).length;
-      return { total, done };
+    function checklistProgress(c: unknown) {
+      const vals = getBoolRecordValues(c);
+      return { total: vals.length, done: vals.filter(Boolean).length };
     }
 
-    function terminationStatus(t: any) {
+    function terminationStatus(t: LocalRow) {
       const { total, done } = checklistProgress(t.checklist);
       return total > 0 && done === total ? "Completed" : "In Progress";
     }
@@ -204,66 +212,62 @@ export default function Page() {
     const termCompleted = term.length - termInProgress;
 
     const totalDamageReports = dmg.length;
-    const openDamageReports = dmg.filter(
-      (r) => r.status === "Open" || r.status === "In Review"
-    ).length;
-    const totalPiecesDamage = dmg.reduce(
-      (sum, r) => sum + (r.piecesTotal || 0),
+    const openDamageReports = dmg.filter((r) => {
+      const s = getString(r, "status");
+      return s === "Open" || s === "In Review";
+    }).length;
+
+    const totalPiecesDamage = dmg.reduce<number>(
+      (sum, r) => sum + getNumber(r, "piecesTotal"),
       0
     );
-    const totalDamaged = dmg.reduce(
-      (sum, r) => sum + (r.piecesDamaged || 0),
+    const totalDamaged = dmg.reduce<number>(
+      (sum, r) => sum + getNumber(r, "piecesDamaged"),
       0
     );
+
     const avgDamagePercent =
       totalPiecesDamage === 0
         ? 0
         : Math.round((totalDamaged / totalPiecesDamage) * 100);
 
-    const startupToday = startup.filter((r) => r.date === todayStr);
+    const startupToday = startup.filter((r) => getString(r, "date") === todayStr);
     const startupTodayTotal = startupToday.length;
+
     const startupTodayCompleted = startupToday.filter((r) => {
-      const items = r.items || {};
-      const vals = Object.values(items) as boolean[];
+      const vals = getBoolRecordValues(r.items);
       return vals.length > 0 && vals.every(Boolean);
     }).length;
 
     const chatsToday = chatAll.filter((m) =>
-      (m.createdAt || "").startsWith(todayStr)
+      getString(m, "createdAt").startsWith(todayStr)
     );
     const chatsTodayCount = chatsToday.length;
 
     // Containers & throughput
     const containersTotal = contAll.length;
     const workOrdersTotal = wo.length;
-    const workOrdersOpen = wo.filter(
-      (item) => item.status === "Pending" || item.status === "Active"
-    ).length;
+    const workOrdersOpen = wo.filter((item) => {
+      const s = getString(item, "status");
+      return s === "Pending" || s === "Active";
+    }).length;
 
-    const contToday = contAll.filter((c: ContainerRecord) =>
-      (c.createdAt || "").startsWith(todayStr)
+    const contToday = contAll.filter((c) =>
+      getString(c, "createdAt").startsWith(todayStr)
     );
 
     const containersToday = contToday.length;
-    const piecesToday = contToday.reduce(
-      (sum: number, c: ContainerRecord) => sum + (c.piecesTotal || 0),
+    const piecesToday = contToday.reduce<number>(
+      (sum, c) => sum + getNumber(c, "piecesTotal"),
       0
     );
 
-    const minutesToday = contToday.reduce(
-      (outerSum: number, c: ContainerRecord) => {
-        const wArr = c.workers || [];
-        const m = wArr.reduce(
-          (inner, w) => inner + (w.minutesWorked || 0),
-          0
-        );
-        return outerSum + m;
-      },
+    const minutesToday = contToday.reduce<number>(
+      (sum, c) => sum + getWorkersMinutes(c),
       0
     );
 
-    const pphToday =
-      minutesToday === 0 ? 0 : (piecesToday * 60) / minutesToday;
+    const pphToday = minutesToday === 0 ? 0 : (piecesToday * 60) / minutesToday;
 
     return {
       totalWorkers,
@@ -293,11 +297,10 @@ export default function Page() {
     containers,
     workOrders,
     todayStr,
-    buildingFilter,
+    matchesBuilding,
   ]);
 
-  const buildingLabel =
-    buildingFilter === "ALL" ? "All Buildings" : buildingFilter;
+  const buildingLabel = buildingFilter === "ALL" ? "All Buildings" : buildingFilter;
 
   async function handleLogout() {
     try {
@@ -328,9 +331,7 @@ export default function Page() {
             <div className="text-xs font-semibold text-sky-300 tracking-wide">
               Precision Pulse
             </div>
-            <div className="text-lg font-semibold text-slate-50">
-              3PL Operations
-            </div>
+            <div className="text-lg font-semibold text-slate-50">3PL Operations</div>
             <div className="mt-1 text-[11px] text-slate-500">
               Enterprise LMS / WMS spine for containers & workforce.
             </div>
@@ -453,10 +454,7 @@ export default function Page() {
               <p className="text-sm text-slate-400">
                 Live overview of workforce, containers, damage, and HR workflows
                 across{" "}
-                <span className="font-semibold text-sky-300">
-                  {buildingLabel}
-                </span>
-                .
+                <span className="font-semibold text-sky-300">{buildingLabel}</span>.
               </p>
               {isLead && currentUser.building && (
                 <p className="text-[11px] text-slate-500 mt-1">
@@ -481,7 +479,8 @@ export default function Page() {
                     )}
                   </div>
                   <div className="text-[10px] text-slate-500">
-                    {currentUser.email} · {currentUser.building || "No building set"}
+                    {currentUser.email} ·{" "}
+                    {currentUser.building || "No building set"}
                   </div>
                 </div>
                 <button
@@ -513,7 +512,8 @@ export default function Page() {
                 </select>
 
                 <span className="text-[11px] text-slate-500">
-                  Today: <span className="text-slate-200 font-mono">{todayStr}</span>
+                  Today:{" "}
+                  <span className="text-slate-200 font-mono">{todayStr}</span>
                 </span>
               </div>
             </div>
@@ -542,7 +542,6 @@ export default function Page() {
               <div className="text-[11px] text-slate-500 mt-1">
                 Total workers: {metrics.totalWorkers}
               </div>
-              {/* Only super admin can navigate to workforce */}
               {isSuperAdmin && (
                 <Link
                   href="/workforce"
@@ -622,10 +621,7 @@ export default function Page() {
                   <div className="text-lg font-semibold text-slate-100">
                     {metrics.containersTotal}
                   </div>
-                  <Link
-                    href="/containers"
-                    className="text-[11px] text-sky-300 hover:underline"
-                  >
+                  <Link href="/containers" className="text-[11px] text-sky-300 hover:underline">
                     Go to Containers →
                   </Link>
                 </CardMini>
@@ -638,10 +634,7 @@ export default function Page() {
                   <div className="text-[11px] text-slate-500 mb-1">
                     Total: {metrics.workOrdersTotal}
                   </div>
-                  <Link
-                    href="/work-orders"
-                    className="text-[11px] text-sky-300 hover:underline"
-                  >
+                  <Link href="/work-orders" className="text-[11px] text-sky-300 hover:underline">
                     Go to Work Orders →
                   </Link>
                 </CardMini>
@@ -672,19 +665,12 @@ export default function Page() {
                     </div>
                   </div>
 
-                  {/* Only super admin can click reports */}
                   {isSuperAdmin ? (
-                    <Link
-                      href="/reports"
-                      className="text-[11px] text-sky-300 hover:underline"
-                    >
+                    <Link href="/reports" className="text-[11px] text-sky-300 hover:underline">
                       See details →
                     </Link>
                   ) : (
-                    <Link
-                      href="/"
-                      className="text-[11px] text-slate-500 hover:text-slate-300"
-                    >
+                    <Link href="/" className="text-[11px] text-slate-500 hover:text-slate-300">
                       See details →
                     </Link>
                   )}
@@ -700,10 +686,7 @@ export default function Page() {
                     </div>
                     <div className="text-[11px] text-slate-500">{buildingLabel}</div>
                   </div>
-                  <Link
-                    href="/startup-checklists"
-                    className="text-[11px] text-sky-300 hover:underline"
-                  >
+                  <Link href="/startup-checklists" className="text-[11px] text-sky-300 hover:underline">
                     View Checklists →
                   </Link>
                 </div>
@@ -712,30 +695,21 @@ export default function Page() {
 
             <CardPanel className="space-y-4 lg:col-span-2">
               <div className="flex items-center justify-between">
-                <h2 className="text-sm font-semibold text-slate-100">
-                  People & Compliance
-                </h2>
-                <span className="text-[11px] text-slate-500">
-                  Workforce · Training · HR
-                </span>
+                <h2 className="text-sm font-semibold text-slate-100">People & Compliance</h2>
+                <span className="text-[11px] text-slate-500">Workforce · Training · HR</span>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
                 <CardMini>
                   <div className="text-slate-300 mb-1">Workforce Overview</div>
                   <div className="text-slate-400">
-                    Active:{" "}
-                    <span className="text-emerald-300">{metrics.activeWorkers}</span>
+                    Active: <span className="text-emerald-300">{metrics.activeWorkers}</span>
                   </div>
                   <div className="text-slate-400">
-                    Total:{" "}
-                    <span className="text-slate-100">{metrics.totalWorkers}</span>
+                    Total: <span className="text-slate-100">{metrics.totalWorkers}</span>
                   </div>
                   {isSuperAdmin && (
-                    <Link
-                      href="/workforce"
-                      className="mt-2 inline-block text-[11px] text-sky-300 hover:underline"
-                    >
+                    <Link href="/workforce" className="mt-2 inline-block text-[11px] text-sky-300 hover:underline">
                       Manage Workforce →
                     </Link>
                   )}
@@ -744,18 +718,13 @@ export default function Page() {
                 <CardMini>
                   <div className="text-slate-300 mb-1">Termination Workflows</div>
                   <div className="text-slate-400">
-                    In Progress:{" "}
-                    <span className="text-rose-300">{metrics.termInProgress}</span>
+                    In Progress: <span className="text-rose-300">{metrics.termInProgress}</span>
                   </div>
                   <div className="text-slate-400">
-                    Completed:{" "}
-                    <span className="text-emerald-300">{metrics.termCompleted}</span>
+                    Completed: <span className="text-emerald-300">{metrics.termCompleted}</span>
                   </div>
                   {isSuperAdmin && (
-                    <Link
-                      href="/terminations"
-                      className="mt-2 inline-block text-[11px] text-sky-300 hover:underline"
-                    >
+                    <Link href="/terminations" className="mt-2 inline-block text-[11px] text-sky-300 hover:underline">
                       View Terminations →
                     </Link>
                   )}
@@ -764,10 +733,7 @@ export default function Page() {
                 <CardMini>
                   <div className="text-slate-300 mb-1">Training & Readiness</div>
                   <div className="text-slate-400">(Hook to Training data later)</div>
-                  <Link
-                    href="/training"
-                    className="mt-2 inline-block text-[11px] text-sky-300 hover:underline"
-                  >
+                  <Link href="/training" className="mt-2 inline-block text-[11px] text-sky-300 hover:underline">
                     Go to Training →
                   </Link>
                 </CardMini>
@@ -778,18 +744,12 @@ export default function Page() {
                   <div>
                     <div className="text-slate-300 mb-1">Quality & Damage</div>
                     <div className="text-slate-400">
-                      Open/Review:{" "}
-                      <span className="text-amber-300">{metrics.openDamageReports}</span>{" "}
-                      · Total:{" "}
-                      <span className="text-slate-100">{metrics.totalDamageReports}</span>{" "}
-                      · Avg Damage:{" "}
+                      Open/Review: <span className="text-amber-300">{metrics.openDamageReports}</span> · Total:{" "}
+                      <span className="text-slate-100">{metrics.totalDamageReports}</span> · Avg Damage:{" "}
                       <span className="text-amber-300">{metrics.avgDamagePercent}%</span>
                     </div>
                   </div>
-                  <Link
-                    href="/damage-reports"
-                    className="text-[11px] text-sky-300 hover:underline"
-                  >
+                  <Link href="/damage-reports" className="text-[11px] text-sky-300 hover:underline">
                     Open Damage Reports →
                   </Link>
                 </div>

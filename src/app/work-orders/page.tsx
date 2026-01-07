@@ -1,16 +1,16 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState, FormEvent } from "react";
+import React, { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { useCurrentUser } from "@/lib/useCurrentUser";
-import { BUILDINGS } from "@/lib/buildings"; // ✅ shared buildings
+import { BUILDINGS } from "@/lib/buildings";
 
 const WORK_ORDERS_KEY = "precisionpulse_work_orders";
 const CONTAINERS_KEY = "precisionpulse_containers";
 
-const SHIFTS = ["1st", "2nd", "3rd", "4th"];
-const STATUS_OPTIONS = ["Pending", "Active", "Completed", "Locked"];
+const SHIFTS = ["1st", "2nd", "3rd", "4th"] as const;
+const STATUS_OPTIONS = ["Pending", "Active", "Completed", "Locked"] as const;
 
 type WorkOrderRecord = {
   id: string;
@@ -20,13 +20,17 @@ type WorkOrderRecord = {
   status: string;
   createdAt: string;
   notes?: string;
+
+  // ✅ ownership fields (used to restrict Lead edits)
+  createdByUserId?: string | null;
+  createdByEmail?: string | null;
 };
 
+// ✅ remove `any` while still allowing extra fields
 type ContainerRecord = {
   id: string;
-  workOrderId?: string;
-  [key: string]: any; // keep any extra fields intact
-};
+  workOrderId?: string | null;
+} & Record<string, unknown>;
 
 // Shape as stored in Supabase
 type WorkOrderRow = {
@@ -37,13 +41,29 @@ type WorkOrderRow = {
   work_order_code: string | null;
   status: string;
   notes: string | null;
+
+  // ✅ ownership fields (optional)
+  created_by_user_id?: string | null;
+  created_by_email?: string | null;
 };
+
+function safeReadArray<T extends Record<string, unknown>>(key: string): T[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? (parsed as T[]) : [];
+  } catch {
+    return [];
+  }
+}
 
 function mapRowToRecord(row: WorkOrderRow): WorkOrderRecord {
   const id = String(row.id);
   const createdAt = row.created_at ?? new Date().toISOString();
   const name =
-    row.work_order_code ?? row.status + " Work Order " + id.slice(-4);
+    row.work_order_code ?? `${row.status ?? "Pending"} Work Order ${id.slice(-4)}`;
 
   return {
     id,
@@ -53,6 +73,9 @@ function mapRowToRecord(row: WorkOrderRow): WorkOrderRecord {
     status: row.status ?? "Pending",
     createdAt,
     notes: row.notes ?? "",
+
+    createdByUserId: row.created_by_user_id ?? null,
+    createdByEmail: row.created_by_email ?? null,
   };
 }
 
@@ -60,14 +83,16 @@ export default function WorkOrdersPage() {
   const currentUser = useCurrentUser();
 
   const [workOrders, setWorkOrders] = useState<WorkOrderRecord[]>([]);
-  const [containers, setContainers] = useState<ContainerRecord[]>([]);
+  const [containers, setContainers] = useState<ContainerRecord[]>(() =>
+    safeReadArray<ContainerRecord>(CONTAINERS_KEY)
+  );
 
   const [editingId, setEditingId] = useState<string | null>(null);
 
   const [name, setName] = useState("");
   const [building, setBuilding] = useState("DC1");
-  const [shift, setShift] = useState("1st");
-  const [status, setStatus] = useState("Pending");
+  const [shift, setShift] = useState<(typeof SHIFTS)[number]>("1st");
+  const [status, setStatus] = useState<(typeof STATUS_OPTIONS)[number]>("Pending");
   const [notes, setNotes] = useState("");
 
   const [filterBuilding, setFilterBuilding] = useState<string>("ALL");
@@ -81,26 +106,46 @@ export default function WorkOrdersPage() {
   const isLead = currentUser?.accessRole === "Lead";
   const leadBuilding = currentUser?.building || "";
 
-  function persistWorkOrders(next: WorkOrderRecord[]) {
+  // ✅ helper — only Leads are restricted by ownership
+  function isOwner(wo: WorkOrderRecord): boolean {
+    if (!currentUser) return false;
+
+    const byId = !!wo.createdByUserId && wo.createdByUserId === currentUser.id;
+
+    const byEmail =
+      !!wo.createdByEmail &&
+      wo.createdByEmail.toLowerCase() === currentUser.email.toLowerCase();
+
+    return byId || byEmail;
+  }
+
+  function canLeadEdit(wo: WorkOrderRecord): boolean {
+    if (!isLead) return true;
+    return isOwner(wo);
+  }
+
+  const persistWorkOrders = useCallback((next: WorkOrderRecord[]) => {
     setWorkOrders(next);
     if (typeof window !== "undefined") {
       window.localStorage.setItem(WORK_ORDERS_KEY, JSON.stringify(next));
     }
-  }
+  }, []);
 
-  function persistContainers(next: ContainerRecord[]) {
+  const persistContainers = useCallback((next: ContainerRecord[]) => {
     setContainers(next);
     if (typeof window !== "undefined") {
       window.localStorage.setItem(CONTAINERS_KEY, JSON.stringify(next));
     }
-  }
+  }, []);
 
-  async function refreshWorkOrders() {
+  // ✅ memoize to satisfy react-hooks/exhaustive-deps
+  const refreshWorkOrders = useCallback(async () => {
     if (!currentUser) return;
+
     setLoading(true);
     setError(null);
+
     try {
-      // ✅ Correct table & role-based query
       let query = supabase
         .from("work_orders")
         .select("*")
@@ -128,13 +173,13 @@ export default function WorkOrdersPage() {
     } finally {
       setLoading(false);
     }
-  }
+  }, [currentUser, isLead, leadBuilding, persistWorkOrders]);
 
   // Load work orders from Supabase when we know who is logged in
   useEffect(() => {
     if (!currentUser) return;
     refreshWorkOrders();
-  }, [currentUser, isLead, leadBuilding]);
+  }, [currentUser, refreshWorkOrders]);
 
   // When we know they're a lead, lock default building + filters
   useEffect(() => {
@@ -144,20 +189,18 @@ export default function WorkOrdersPage() {
     }
   }, [isLead, leadBuilding]);
 
-  // Load containers from localStorage for "containers per work order" counts
+  // (Optional) If other tabs update localStorage containers, keep in sync.
   useEffect(() => {
     if (typeof window === "undefined") return;
 
-    try {
-      const raw = window.localStorage.getItem(CONTAINERS_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        const arr: ContainerRecord[] = Array.isArray(parsed) ? parsed : [];
-        setContainers(arr);
+    function onStorage(e: StorageEvent) {
+      if (e.key === CONTAINERS_KEY) {
+        setContainers(safeReadArray<ContainerRecord>(CONTAINERS_KEY));
       }
-    } catch (e) {
-      console.error("Failed to load containers for work order linking", e);
     }
+
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
   }, []);
 
   function resetForm() {
@@ -170,15 +213,27 @@ export default function WorkOrdersPage() {
   }
 
   function handleEdit(order: WorkOrderRecord) {
+    // ✅ block Leads from editing non-owned entries
+    if (isLead && !canLeadEdit(order)) {
+      setError("Leads can only edit their own work orders.");
+      return;
+    }
+
     setEditingId(order.id);
     setName(order.name);
     setBuilding(order.building);
-    setShift(order.shift);
-    setStatus(order.status);
+    setShift(order.shift as (typeof SHIFTS)[number]);
+    setStatus(order.status as (typeof STATUS_OPTIONS)[number]);
     setNotes(order.notes ?? "");
   }
 
   async function handleDelete(order: WorkOrderRecord) {
+    // ✅ enforce Lead ownership on delete
+    if (isLead && !canLeadEdit(order)) {
+      setError("Leads can only delete their own work orders.");
+      return;
+    }
+
     if (typeof window !== "undefined") {
       const confirmDelete = window.confirm(
         "Delete this work order? Any containers linked to it will stay, but the link to this work order will be removed."
@@ -190,10 +245,7 @@ export default function WorkOrdersPage() {
     setError(null);
 
     try {
-      const { error } = await supabase
-        .from("work_orders")
-        .delete()
-        .eq("id", order.id);
+      const { error } = await supabase.from("work_orders").delete().eq("id", order.id);
 
       if (error) {
         console.error("Error deleting work order", error);
@@ -205,19 +257,16 @@ export default function WorkOrdersPage() {
       const updatedContainers = containers.map((c) => {
         if (c.workOrderId === order.id) {
           const copy = { ...c };
-          delete copy.workOrderId;
+          delete (copy as Record<string, unknown>).workOrderId;
           return copy;
         }
         return c;
       });
       persistContainers(updatedContainers);
 
-      // Reload from Supabase to keep in sync
       await refreshWorkOrders();
 
-      if (editingId === order.id) {
-        resetForm();
-      }
+      if (editingId === order.id) resetForm();
     } catch (e) {
       console.error("Unexpected error deleting work order", e);
       setError("Unexpected error deleting work order.");
@@ -231,9 +280,7 @@ export default function WorkOrdersPage() {
     if (saving) return;
 
     if (!name.trim()) {
-      if (typeof window !== "undefined") {
-        window.alert("Please enter a work order name.");
-      }
+      if (typeof window !== "undefined") window.alert("Please enter a work order name.");
       return;
     }
 
@@ -242,10 +289,13 @@ export default function WorkOrdersPage() {
 
     try {
       // Force building for Leads
-      const effectiveBuilding =
-        isLead && leadBuilding ? leadBuilding : building;
+      const effectiveBuilding = isLead && leadBuilding ? leadBuilding : building;
 
-      const payload = {
+      // ✅ remove `any` payload
+      const payload: Partial<WorkOrderRow> & {
+        created_by_user_id?: string | null;
+        created_by_email?: string | null;
+      } = {
         building: effectiveBuilding,
         shift_name: shift,
         work_order_code: name.trim(),
@@ -254,10 +304,16 @@ export default function WorkOrdersPage() {
       };
 
       if (editingId) {
-        const { error } = await supabase
-          .from("work_orders")
-          .update(payload)
-          .eq("id", editingId);
+        // ✅ enforce Lead ownership on update
+        if (isLead) {
+          const existing = workOrders.find((w) => w.id === editingId);
+          if (!existing || !canLeadEdit(existing)) {
+            setError("Leads can only edit their own work orders.");
+            return;
+          }
+        }
+
+        const { error } = await supabase.from("work_orders").update(payload).eq("id", editingId);
 
         if (error) {
           console.error("Error updating work order", error);
@@ -265,7 +321,12 @@ export default function WorkOrdersPage() {
           return;
         }
       } else {
+        // ✅ stamp ownership on create
+        payload.created_by_user_id = currentUser?.id ?? null;
+        payload.created_by_email = currentUser?.email ?? null;
+
         const { error } = await supabase.from("work_orders").insert(payload);
+
         if (error) {
           console.error("Error creating work order", error);
           setError("Failed to create work order.");
@@ -287,15 +348,9 @@ export default function WorkOrdersPage() {
     return workOrders
       .filter((wo) => {
         // Extra safety: Leads only see their building even in-memory
-        if (isLead && leadBuilding && wo.building !== leadBuilding) {
-          return false;
-        }
-        if (filterBuilding !== "ALL" && wo.building !== filterBuilding) {
-          return false;
-        }
-        if (filterStatus !== "ALL" && wo.status !== filterStatus) {
-          return false;
-        }
+        if (isLead && leadBuilding && wo.building !== leadBuilding) return false;
+        if (filterBuilding !== "ALL" && wo.building !== filterBuilding) return false;
+        if (filterStatus !== "ALL" && wo.status !== filterStatus) return false;
         return true;
       })
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
@@ -310,10 +365,7 @@ export default function WorkOrdersPage() {
     return (
       <div className="min-h-screen bg-slate-950 text-slate-400 flex flex-col items-center justify-center text-sm gap-2">
         <div>Redirecting to login…</div>
-        <a
-          href="/auth"
-          className="text-sky-400 text-xs underline hover:text-sky-300"
-        >
+        <a href="/auth" className="text-sky-400 text-xs underline hover:text-sky-300">
           Click here if you are not redirected.
         </a>
       </div>
@@ -326,12 +378,9 @@ export default function WorkOrdersPage() {
         {/* Header */}
         <div className="flex items-center justify-between gap-4">
           <div>
-            <h1 className="text-2xl font-semibold text-slate-50">
-              Work Orders
-            </h1>
+            <h1 className="text-2xl font-semibold text-slate-50">Work Orders</h1>
             <p className="text-sm text-slate-400">
-              Create, edit, and manage work orders that group containers
-              by building, shift, and status.
+              Create, edit, and manage work orders that group containers by building, shift, and status.
             </p>
           </div>
           <Link
@@ -360,16 +409,16 @@ export default function WorkOrdersPage() {
                 </button>
               )}
             </div>
+
             {error && (
               <div className="mb-2 rounded-lg border border-rose-700 bg-rose-950/40 px-3 py-2 text-[11px] text-rose-100">
                 {error}
               </div>
             )}
+
             <form onSubmit={handleSubmit} className="space-y-3">
               <div>
-                <label className="block text-[11px] text-slate-400 mb-1">
-                  Work Order Name
-                </label>
+                <label className="block text-[11px] text-slate-400 mb-1">Work Order Name</label>
                 <input
                   className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
                   placeholder="Example: DC18 Inbound Wave 1"
@@ -380,9 +429,7 @@ export default function WorkOrdersPage() {
 
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="block text-[11px] text-slate-400 mb-1">
-                    Building
-                  </label>
+                  <label className="block text-[11px] text-slate-400 mb-1">Building</label>
                   <select
                     className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
                     value={building}
@@ -390,9 +437,7 @@ export default function WorkOrdersPage() {
                     disabled={isLead && !!leadBuilding}
                   >
                     {BUILDINGS.map((b) => {
-                      if (isLead && leadBuilding && b !== leadBuilding) {
-                        return null;
-                      }
+                      if (isLead && leadBuilding && b !== leadBuilding) return null;
                       return (
                         <option key={b} value={b}>
                           {b}
@@ -401,14 +446,13 @@ export default function WorkOrdersPage() {
                     })}
                   </select>
                 </div>
+
                 <div>
-                  <label className="block text-[11px] text-slate-400 mb-1">
-                    Shift
-                  </label>
+                  <label className="block text-[11px] text-slate-400 mb-1">Shift</label>
                   <select
                     className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
                     value={shift}
-                    onChange={(e) => setShift(e.target.value)}
+                    onChange={(e) => setShift(e.target.value as (typeof SHIFTS)[number])}
                   >
                     {SHIFTS.map((s) => (
                       <option key={s} value={s}>
@@ -420,13 +464,11 @@ export default function WorkOrdersPage() {
               </div>
 
               <div>
-                <label className="block text-[11px] text-slate-400 mb-1">
-                  Status
-                </label>
+                <label className="block text-[11px] text-slate-400 mb-1">Status</label>
                 <select
                   className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
                   value={status}
-                  onChange={(e) => setStatus(e.target.value)}
+                  onChange={(e) => setStatus(e.target.value as (typeof STATUS_OPTIONS)[number])}
                 >
                   {STATUS_OPTIONS.map((s) => (
                     <option key={s} value={s}>
@@ -437,9 +479,7 @@ export default function WorkOrdersPage() {
               </div>
 
               <div>
-                <label className="block text-[11px] text-slate-400 mb-1">
-                  Notes (optional)
-                </label>
+                <label className="block text-[11px] text-slate-400 mb-1">Notes (optional)</label>
                 <textarea
                   rows={3}
                   className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50 resize-none"
@@ -454,11 +494,7 @@ export default function WorkOrdersPage() {
                 disabled={saving}
                 className="mt-1 w-full rounded-lg bg-sky-600 hover:bg-sky-500 disabled:opacity-60 text-[11px] font-medium text-white px-4 py-2"
               >
-                {saving
-                  ? "Saving…"
-                  : editingId
-                  ? "Save Changes"
-                  : "Create Work Order"}
+                {saving ? "Saving…" : editingId ? "Save Changes" : "Create Work Order"}
               </button>
             </form>
           </div>
@@ -468,9 +504,7 @@ export default function WorkOrdersPage() {
             <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 text-xs">
               <div className="flex items-center justify-between mb-3">
                 <div>
-                  <div className="text-slate-200 text-sm font-semibold">
-                    Filters
-                  </div>
+                  <div className="text-slate-200 text-sm font-semibold">Filters</div>
                   <div className="text-[11px] text-slate-500">
                     Narrow down work orders by building and status.
                   </div>
@@ -478,13 +512,9 @@ export default function WorkOrdersPage() {
                 <button
                   type="button"
                   onClick={() => {
-                    // Reset filters, but keep lead locked to their building
                     setFilterStatus("ALL");
-                    if (!isLead) {
-                      setFilterBuilding("ALL");
-                    } else if (isLead && leadBuilding) {
-                      setFilterBuilding(leadBuilding);
-                    }
+                    if (!isLead) setFilterBuilding("ALL");
+                    else if (leadBuilding) setFilterBuilding(leadBuilding);
                   }}
                   className="text-[11px] text-sky-300 hover:underline"
                 >
@@ -494,9 +524,7 @@ export default function WorkOrdersPage() {
 
               <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
                 <div>
-                  <label className="block text-[11px] text-slate-400 mb-1">
-                    Building
-                  </label>
+                  <label className="block text-[11px] text-slate-400 mb-1">Building</label>
                   <select
                     className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
                     value={filterBuilding}
@@ -505,9 +533,7 @@ export default function WorkOrdersPage() {
                   >
                     {!isLead && <option value="ALL">All Buildings</option>}
                     {BUILDINGS.map((b) => {
-                      if (isLead && leadBuilding && b !== leadBuilding) {
-                        return null;
-                      }
+                      if (isLead && leadBuilding && b !== leadBuilding) return null;
                       return (
                         <option key={b} value={b}>
                           {b}
@@ -516,10 +542,9 @@ export default function WorkOrdersPage() {
                     })}
                   </select>
                 </div>
+
                 <div>
-                  <label className="block text-[11px] text-slate-400 mb-1">
-                    Status
-                  </label>
+                  <label className="block text-[11px] text-slate-400 mb-1">Status</label>
                   <select
                     className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
                     value={filterStatus}
@@ -533,35 +558,23 @@ export default function WorkOrdersPage() {
                     ))}
                   </select>
                 </div>
+
                 <div className="hidden md:block">
-                  <div className="text-[11px] text-slate-400 mb-1">
-                    Summary
-                  </div>
+                  <div className="text-[11px] text-slate-400 mb-1">Summary</div>
                   <div className="text-[11px] text-slate-300">
-                    Total:{" "}
-                    <span className="font-semibold">
-                      {workOrders.length}
-                    </span>{" "}
-                    · Showing:{" "}
-                    <span className="font-semibold">
-                      {displayedOrders.length}
-                    </span>
+                    Total: <span className="font-semibold">{workOrders.length}</span> · Showing:{" "}
+                    <span className="font-semibold">{displayedOrders.length}</span>
                   </div>
                 </div>
               </div>
-              {loading && (
-                <div className="mt-2 text-[11px] text-slate-500">
-                  Loading work orders…
-                </div>
-              )}
+
+              {loading && <div className="mt-2 text-[11px] text-slate-500">Loading work orders…</div>}
             </div>
 
             {/* Table */}
             <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 text-xs">
               <div className="flex items-center justify-between mb-2">
-                <div className="text-slate-200 text-sm font-semibold">
-                  Work Order List
-                </div>
+                <div className="text-slate-200 text-sm font-semibold">Work Order List</div>
                 <div className="text-[11px] text-slate-500">
                   Click a work order name to open and see containers.
                 </div>
@@ -569,41 +582,27 @@ export default function WorkOrdersPage() {
 
               {displayedOrders.length === 0 ? (
                 <p className="text-sm text-slate-500">
-                  No work orders found. Create one on the left to get
-                  started.
+                  No work orders found. Create one on the left to get started.
                 </p>
               ) : (
                 <div className="overflow-auto max-h-[480px]">
                   <table className="min-w-full text-left border-collapse">
                     <thead>
                       <tr className="border-b border-slate-800 bg-slate-950/60">
-                        <th className="px-3 py-2 text-[11px] text-slate-400">
-                          Name
-                        </th>
-                        <th className="px-3 py-2 text-[11px] text-slate-400">
-                          Building
-                        </th>
-                        <th className="px-3 py-2 text-[11px] text-slate-400">
-                          Shift
-                        </th>
-                        <th className="px-3 py-2 text-[11px] text-slate-400">
-                          Status
-                        </th>
-                        <th className="px-3 py-2 text-[11px] text-slate-400 text-right">
-                          Containers
-                        </th>
-                        <th className="px-3 py-2 text-[11px] text-slate-400 text-right">
-                          Created
-                        </th>
-                        <th className="px-3 py-2 text-[11px] text-slate-400 text-right">
-                          Actions
-                        </th>
+                        <th className="px-3 py-2 text-[11px] text-slate-400">Name</th>
+                        <th className="px-3 py-2 text-[11px] text-slate-400">Building</th>
+                        <th className="px-3 py-2 text-[11px] text-slate-400">Shift</th>
+                        <th className="px-3 py-2 text-[11px] text-slate-400">Status</th>
+                        <th className="px-3 py-2 text-[11px] text-slate-400 text-right">Containers</th>
+                        <th className="px-3 py-2 text-[11px] text-slate-400 text-right">Created</th>
+                        <th className="px-3 py-2 text-[11px] text-slate-400 text-right">Actions</th>
                       </tr>
                     </thead>
                     <tbody>
                       {displayedOrders.map((wo) => {
                         const containersForThis = containersForOrder(wo.id);
                         const dateShort = wo.createdAt.slice(0, 10);
+                        const leadBlocked = isLead && !canLeadEdit(wo);
 
                         return (
                           <tr
@@ -626,12 +625,10 @@ export default function WorkOrdersPage() {
                                 </span>
                               </Link>
                             </td>
-                            <td className="px-3 py-2 text-slate-300">
-                              {wo.building}
-                            </td>
-                            <td className="px-3 py-2 text-slate-300">
-                              {wo.shift}
-                            </td>
+
+                            <td className="px-3 py-2 text-slate-300">{wo.building}</td>
+                            <td className="px-3 py-2 text-slate-300">{wo.shift}</td>
+
                             <td className="px-3 py-2">
                               <span
                                 className={
@@ -648,26 +645,41 @@ export default function WorkOrdersPage() {
                                 {wo.status}
                               </span>
                             </td>
+
                             <td className="px-3 py-2 text-right text-slate-200">
                               {containersForThis.length}
                             </td>
+
                             <td className="px-3 py-2 text-right text-slate-300 font-mono">
                               {dateShort}
                             </td>
+
                             <td className="px-3 py-2 text-right">
                               <div className="inline-flex gap-2">
                                 <button
                                   type="button"
                                   onClick={() => handleEdit(wo)}
-                                  className="text-[11px] text-sky-300 hover:underline"
+                                  className="text-[11px] text-sky-300 hover:underline disabled:opacity-50 disabled:cursor-not-allowed"
+                                  disabled={leadBlocked}
+                                  title={
+                                    leadBlocked
+                                      ? "Leads can only edit their own work orders."
+                                      : "Edit"
+                                  }
                                 >
                                   Edit
                                 </button>
+
                                 <button
                                   type="button"
                                   onClick={() => handleDelete(wo)}
-                                  className="text-[11px] text-rose-300 hover:underline"
-                                  disabled={saving}
+                                  className="text-[11px] text-rose-300 hover:underline disabled:opacity-50 disabled:cursor-not-allowed"
+                                  disabled={saving || leadBlocked}
+                                  title={
+                                    leadBlocked
+                                      ? "Leads can only delete their own work orders."
+                                      : "Delete"
+                                  }
                                 >
                                   Delete
                                 </button>

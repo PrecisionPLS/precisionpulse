@@ -8,7 +8,7 @@ import { useCurrentUser } from "@/lib/useCurrentUser";
 type AuthUserDebug = {
   id: string;
   email: string | null;
-  user_metadata: any;
+  user_metadata: Record<string, unknown>;
   created_at: string | null;
   last_sign_in_at: string | null;
 };
@@ -201,9 +201,12 @@ export default function AdminDebugPage() {
             label="Auth user_metadata.accessRole"
             value={
               (authUser?.user_metadata &&
-                (authUser.user_metadata.accessRole ||
-                  authUser.user_metadata.role)) ||
-              undefined
+                (typeof authUser.user_metadata.accessRole === 'string'
+                  ? authUser.user_metadata.accessRole
+                  : typeof authUser.user_metadata.role === 'string'
+                  ? authUser.user_metadata.role
+                  : null)) ||
+              null
             }
             hint="Optional, no longer authoritative"
           />
