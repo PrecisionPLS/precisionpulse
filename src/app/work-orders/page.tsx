@@ -21,18 +21,16 @@ type WorkOrderRecord = {
   createdAt: string;
   notes?: string;
 
-  // ✅ ownership fields (used to restrict Lead edits)
+  // ownership fields (optional)
   createdByUserId?: string | null;
   createdByEmail?: string | null;
 };
 
-// ✅ remove `any` while still allowing extra fields
 type ContainerRecord = {
   id: string;
   workOrderId?: string | null;
 } & Record<string, unknown>;
 
-// Shape as stored in Supabase
 type WorkOrderRow = {
   id: string;
   created_at: string;
@@ -42,7 +40,7 @@ type WorkOrderRow = {
   status: string;
   notes: string | null;
 
-  // ✅ ownership fields (optional)
+  // optional columns (may not exist in your DB)
   created_by_user_id?: string | null;
   created_by_email?: string | null;
 };
@@ -63,7 +61,8 @@ function mapRowToRecord(row: WorkOrderRow): WorkOrderRecord {
   const id = String(row.id);
   const createdAt = row.created_at ?? new Date().toISOString();
   const name =
-    row.work_order_code ?? `${row.status ?? "Pending"} Work Order ${id.slice(-4)}`;
+    row.work_order_code ??
+    `${row.status ?? "Pending"} Work Order ${id.slice(-4)}`;
 
   return {
     id,
@@ -77,6 +76,65 @@ function mapRowToRecord(row: WorkOrderRow): WorkOrderRecord {
     createdByUserId: row.created_by_user_id ?? null,
     createdByEmail: row.created_by_email ?? null,
   };
+}
+
+function extractSupabaseError(err: unknown): Record<string, unknown> {
+  const extracted: Record<string, unknown> = {
+    type: typeof err,
+    string: String(err),
+  };
+
+  if (typeof err === "object" && err !== null) {
+    const rec = err as Record<string, unknown>;
+
+    if (typeof rec.message === "string") extracted.message = rec.message;
+    if (typeof rec.details === "string") extracted.details = rec.details;
+    if (typeof rec.hint === "string") extracted.hint = rec.hint;
+    if (typeof rec.code === "string") extracted.code = rec.code;
+    if (typeof rec.status === "number") extracted.status = rec.status;
+
+    for (const k of Object.getOwnPropertyNames(err)) {
+      extracted[k] = rec[k];
+    }
+  }
+
+  return extracted;
+}
+
+// Supabase errors often stringify to {} — log safely, and avoid Next's red overlay for expected retries.
+function logSupabaseError(
+  label: string,
+  err: unknown,
+  level: "error" | "warn" | "debug" = "error"
+) {
+  const extracted = extractSupabaseError(err);
+
+  const logger =
+    level === "error" ? console.error : level === "warn" ? console.warn : console.debug;
+
+  logger(label, extracted);
+}
+
+function formatSupabaseError(err: unknown): string {
+  const e = extractSupabaseError(err);
+  const msg =
+    (typeof e.message === "string" && e.message) ||
+    (typeof e.details === "string" && e.details) ||
+    (typeof e.hint === "string" && e.hint) ||
+    "";
+  return msg || "Unknown error (check console for details).";
+}
+
+function isMissingOwnershipColumnError(err: unknown): boolean {
+  const e = extractSupabaseError(err);
+  const msg = String(e.message ?? e.details ?? e.hint ?? "").toLowerCase();
+
+  // Postgres "column does not exist" often appears like:
+  // 'column "created_by_user_id" of relation "work_orders" does not exist'
+  return (
+    msg.includes("does not exist") &&
+    (msg.includes("created_by_user_id") || msg.includes("created_by_email"))
+  );
 }
 
 export default function WorkOrdersPage() {
@@ -102,11 +160,49 @@ export default function WorkOrdersPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Role-based info
+  // role info
   const isLead = currentUser?.accessRole === "Lead";
   const leadBuilding = currentUser?.building || "";
 
-  // ✅ helper — only Leads are restricted by ownership
+  // Cache whether ownership columns exist in DB.
+  // If they don't exist, we must NOT insert them.
+  const [ownershipColsSupported, setOwnershipColsSupported] = useState<boolean | null>(null);
+
+  // Check schema once (client-side) after login.
+  useEffect(() => {
+    if (!currentUser) return;
+
+    let cancelled = false;
+
+    async function probe() {
+      try {
+        // If RLS blocks this select, we treat as not supported to keep inserts safe.
+        const { error } = await supabase
+          .from("work_orders")
+          .select("created_by_user_id,created_by_email")
+          .limit(1);
+
+        if (cancelled) return;
+
+        if (error) {
+          setOwnershipColsSupported(false);
+          // Avoid red overlay — this isn't fatal; it just means we won't use those fields.
+          logSupabaseError("Ownership column probe failed (treated as unsupported)", error, "warn");
+        } else {
+          setOwnershipColsSupported(true);
+        }
+      } catch (e) {
+        if (!cancelled) setOwnershipColsSupported(false);
+        logSupabaseError("Ownership column probe threw (treated as unsupported)", e, "warn");
+      }
+    }
+
+    probe();
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUser]);
+
   function isOwner(wo: WorkOrderRecord): boolean {
     if (!currentUser) return false;
 
@@ -138,7 +234,6 @@ export default function WorkOrdersPage() {
     }
   }, []);
 
-  // ✅ memoize to satisfy react-hooks/exhaustive-deps
   const refreshWorkOrders = useCallback(async () => {
     if (!currentUser) return;
 
@@ -151,7 +246,6 @@ export default function WorkOrdersPage() {
         .select("*")
         .order("created_at", { ascending: false });
 
-      // Leads only see work orders for their building
       if (isLead && leadBuilding) {
         query = query.eq("building", leadBuilding);
       }
@@ -159,7 +253,7 @@ export default function WorkOrdersPage() {
       const { data, error } = await query;
 
       if (error) {
-        console.error("Error loading work orders", error);
+        logSupabaseError("Error loading work orders", error, "error");
         setError("Failed to load work orders from server.");
         return;
       }
@@ -168,20 +262,18 @@ export default function WorkOrdersPage() {
       const mapped = rows.map(mapRowToRecord);
       persistWorkOrders(mapped);
     } catch (e) {
-      console.error("Unexpected error loading work orders", e);
+      logSupabaseError("Unexpected error loading work orders", e, "error");
       setError("Unexpected error loading work orders.");
     } finally {
       setLoading(false);
     }
   }, [currentUser, isLead, leadBuilding, persistWorkOrders]);
 
-  // Load work orders from Supabase when we know who is logged in
   useEffect(() => {
     if (!currentUser) return;
     refreshWorkOrders();
   }, [currentUser, refreshWorkOrders]);
 
-  // When we know they're a lead, lock default building + filters
   useEffect(() => {
     if (isLead && leadBuilding) {
       setFilterBuilding((prev) => (prev === "ALL" ? leadBuilding : prev));
@@ -189,7 +281,6 @@ export default function WorkOrdersPage() {
     }
   }, [isLead, leadBuilding]);
 
-  // (Optional) If other tabs update localStorage containers, keep in sync.
   useEffect(() => {
     if (typeof window === "undefined") return;
 
@@ -213,7 +304,6 @@ export default function WorkOrdersPage() {
   }
 
   function handleEdit(order: WorkOrderRecord) {
-    // ✅ block Leads from editing non-owned entries
     if (isLead && !canLeadEdit(order)) {
       setError("Leads can only edit their own work orders.");
       return;
@@ -228,17 +318,16 @@ export default function WorkOrdersPage() {
   }
 
   async function handleDelete(order: WorkOrderRecord) {
-    // ✅ enforce Lead ownership on delete
     if (isLead && !canLeadEdit(order)) {
       setError("Leads can only delete their own work orders.");
       return;
     }
 
     if (typeof window !== "undefined") {
-      const confirmDelete = window.confirm(
+      const ok = window.confirm(
         "Delete this work order? Any containers linked to it will stay, but the link to this work order will be removed."
       );
-      if (!confirmDelete) return;
+      if (!ok) return;
     }
 
     setSaving(true);
@@ -248,12 +337,11 @@ export default function WorkOrdersPage() {
       const { error } = await supabase.from("work_orders").delete().eq("id", order.id);
 
       if (error) {
-        console.error("Error deleting work order", error);
+        logSupabaseError("Error deleting work order", error, "error");
         setError("Failed to delete work order.");
         return;
       }
 
-      // Detach containers that were linked to this work order (local only for now)
       const updatedContainers = containers.map((c) => {
         if (c.workOrderId === order.id) {
           const copy = { ...c };
@@ -265,10 +353,9 @@ export default function WorkOrdersPage() {
       persistContainers(updatedContainers);
 
       await refreshWorkOrders();
-
       if (editingId === order.id) resetForm();
     } catch (e) {
-      console.error("Unexpected error deleting work order", e);
+      logSupabaseError("Unexpected error deleting work order", e, "error");
       setError("Unexpected error deleting work order.");
     } finally {
       setSaving(false);
@@ -288,14 +375,10 @@ export default function WorkOrdersPage() {
     setError(null);
 
     try {
-      // Force building for Leads
       const effectiveBuilding = isLead && leadBuilding ? leadBuilding : building;
 
-      // ✅ remove `any` payload
-      const payload: Partial<WorkOrderRow> & {
-        created_by_user_id?: string | null;
-        created_by_email?: string | null;
-      } = {
+      // Base payload = only columns that we KNOW exist on your table.
+      const basePayload: Partial<WorkOrderRow> = {
         building: effectiveBuilding,
         shift_name: shift,
         work_order_code: name.trim(),
@@ -304,7 +387,6 @@ export default function WorkOrdersPage() {
       };
 
       if (editingId) {
-        // ✅ enforce Lead ownership on update
         if (isLead) {
           const existing = workOrders.find((w) => w.id === editingId);
           if (!existing || !canLeadEdit(existing)) {
@@ -313,23 +395,45 @@ export default function WorkOrdersPage() {
           }
         }
 
-        const { error } = await supabase.from("work_orders").update(payload).eq("id", editingId);
+        const { error } = await supabase.from("work_orders").update(basePayload).eq("id", editingId);
 
         if (error) {
-          console.error("Error updating work order", error);
+          logSupabaseError("Error updating work order", error, "error");
           setError("Failed to update work order.");
           return;
         }
       } else {
-        // ✅ stamp ownership on create
-        payload.created_by_user_id = currentUser?.id ?? null;
-        payload.created_by_email = currentUser?.email ?? null;
+        // Create: try with ownership columns ONLY if supported. If it fails due to missing cols, retry without them.
+        let createPayload: Record<string, unknown> = { ...basePayload };
 
-        const { error } = await supabase.from("work_orders").insert(payload);
+        if (ownershipColsSupported) {
+          createPayload = {
+            ...createPayload,
+            created_by_user_id: currentUser?.id ?? null,
+            created_by_email: currentUser?.email ?? null,
+          };
+        }
 
-        if (error) {
-          console.error("Error creating work order", error);
-          setError("Failed to create work order.");
+        // Do select().single() so we get real PostgREST error info back in dev.
+        let res = await supabase.from("work_orders").insert(createPayload).select("id").single();
+
+        if (res.error && ownershipColsSupported && isMissingOwnershipColumnError(res.error)) {
+          // Expected if those cols don't exist; don't trigger red overlay.
+          logSupabaseError(
+            "Insert failed (ownership cols missing) — retrying without ownership",
+            res.error,
+            "warn"
+          );
+
+          // Mark unsupported so we don't try again this session
+          setOwnershipColsSupported(false);
+
+          res = await supabase.from("work_orders").insert(basePayload).select("id").single();
+        }
+
+        if (res.error) {
+          logSupabaseError("Error creating work order", res.error, "error");
+          setError(formatSupabaseError(res.error) || "Failed to create work order.");
           return;
         }
       }
@@ -337,8 +441,8 @@ export default function WorkOrdersPage() {
       await refreshWorkOrders();
       resetForm();
     } catch (e) {
-      console.error("Unexpected error saving work order", e);
-      setError("Unexpected error saving work order.");
+      logSupabaseError("Unexpected error saving work order", e, "error");
+      setError(formatSupabaseError(e) || "Unexpected error saving work order.");
     } finally {
       setSaving(false);
     }
@@ -347,7 +451,6 @@ export default function WorkOrdersPage() {
   const displayedOrders = useMemo(() => {
     return workOrders
       .filter((wo) => {
-        // Extra safety: Leads only see their building even in-memory
         if (isLead && leadBuilding && wo.building !== leadBuilding) return false;
         if (filterBuilding !== "ALL" && wo.building !== filterBuilding) return false;
         if (filterStatus !== "ALL" && wo.status !== filterStatus) return false;
@@ -360,7 +463,6 @@ export default function WorkOrdersPage() {
     return containers.filter((c) => c.workOrderId === orderId);
   }
 
-  // Protect route after all hooks are declared
   if (!currentUser) {
     return (
       <div className="min-h-screen bg-slate-950 text-slate-400 flex flex-col items-center justify-center text-sm gap-2">
@@ -375,7 +477,6 @@ export default function WorkOrdersPage() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-950 to-slate-900 text-slate-50">
       <div className="mx-auto max-w-6xl p-6 space-y-6">
-        {/* Header */}
         <div className="flex items-center justify-between gap-4">
           <div>
             <h1 className="text-2xl font-semibold text-slate-50">Work Orders</h1>
@@ -391,9 +492,7 @@ export default function WorkOrdersPage() {
           </Link>
         </div>
 
-        {/* Form + filters */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Form */}
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 text-xs space-y-3">
             <div className="flex items-center justify-between mb-1">
               <div className="text-slate-200 text-sm font-semibold">
@@ -496,18 +595,22 @@ export default function WorkOrdersPage() {
               >
                 {saving ? "Saving…" : editingId ? "Save Changes" : "Create Work Order"}
               </button>
+
+              <div className="text-[10px] text-slate-500">
+                Ownership columns detected:{" "}
+                <span className="text-slate-300">
+                  {ownershipColsSupported === null ? "checking…" : ownershipColsSupported ? "yes" : "no"}
+                </span>
+              </div>
             </form>
           </div>
 
-          {/* Filters + summary */}
           <div className="lg:col-span-2 space-y-4">
             <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 text-xs">
               <div className="flex items-center justify-between mb-3">
                 <div>
                   <div className="text-slate-200 text-sm font-semibold">Filters</div>
-                  <div className="text-[11px] text-slate-500">
-                    Narrow down work orders by building and status.
-                  </div>
+                  <div className="text-[11px] text-slate-500">Narrow down work orders by building and status.</div>
                 </div>
                 <button
                   type="button"
@@ -571,19 +674,14 @@ export default function WorkOrdersPage() {
               {loading && <div className="mt-2 text-[11px] text-slate-500">Loading work orders…</div>}
             </div>
 
-            {/* Table */}
             <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 text-xs">
               <div className="flex items-center justify-between mb-2">
                 <div className="text-slate-200 text-sm font-semibold">Work Order List</div>
-                <div className="text-[11px] text-slate-500">
-                  Click a work order name to open and see containers.
-                </div>
+                <div className="text-[11px] text-slate-500">Click a work order name to open and see containers.</div>
               </div>
 
               {displayedOrders.length === 0 ? (
-                <p className="text-sm text-slate-500">
-                  No work orders found. Create one on the left to get started.
-                </p>
+                <p className="text-sm text-slate-500">No work orders found. Create one on the left to get started.</p>
               ) : (
                 <div className="overflow-auto max-h-[480px]">
                   <table className="min-w-full text-left border-collapse">
@@ -605,10 +703,7 @@ export default function WorkOrdersPage() {
                         const leadBlocked = isLead && !canLeadEdit(wo);
 
                         return (
-                          <tr
-                            key={wo.id}
-                            className="border-b border-slate-800/60 hover:bg-slate-900/60"
-                          >
+                          <tr key={wo.id} className="border-b border-slate-800/60 hover:bg-slate-900/60">
                             <td className="px-3 py-2 text-slate-100">
                               <Link
                                 href={`/work-orders/${wo.id}`}
@@ -616,13 +711,9 @@ export default function WorkOrdersPage() {
                               >
                                 <span>{wo.name}</span>
                                 {wo.notes && (
-                                  <span className="text-[11px] text-slate-500 line-clamp-1">
-                                    {wo.notes}
-                                  </span>
+                                  <span className="text-[11px] text-slate-500 line-clamp-1">{wo.notes}</span>
                                 )}
-                                <span className="text-[10px] text-sky-400 mt-0.5">
-                                  View details & containers
-                                </span>
+                                <span className="text-[10px] text-sky-400 mt-0.5">View details & containers</span>
                               </Link>
                             </td>
 
@@ -646,13 +737,8 @@ export default function WorkOrdersPage() {
                               </span>
                             </td>
 
-                            <td className="px-3 py-2 text-right text-slate-200">
-                              {containersForThis.length}
-                            </td>
-
-                            <td className="px-3 py-2 text-right text-slate-300 font-mono">
-                              {dateShort}
-                            </td>
+                            <td className="px-3 py-2 text-right text-slate-200">{containersForThis.length}</td>
+                            <td className="px-3 py-2 text-right text-slate-300 font-mono">{dateShort}</td>
 
                             <td className="px-3 py-2 text-right">
                               <div className="inline-flex gap-2">
@@ -661,11 +747,7 @@ export default function WorkOrdersPage() {
                                   onClick={() => handleEdit(wo)}
                                   className="text-[11px] text-sky-300 hover:underline disabled:opacity-50 disabled:cursor-not-allowed"
                                   disabled={leadBlocked}
-                                  title={
-                                    leadBlocked
-                                      ? "Leads can only edit their own work orders."
-                                      : "Edit"
-                                  }
+                                  title={leadBlocked ? "Leads can only edit their own work orders." : "Edit"}
                                 >
                                   Edit
                                 </button>
@@ -675,11 +757,7 @@ export default function WorkOrdersPage() {
                                   onClick={() => handleDelete(wo)}
                                   className="text-[11px] text-rose-300 hover:underline disabled:opacity-50 disabled:cursor-not-allowed"
                                   disabled={saving || leadBlocked}
-                                  title={
-                                    leadBlocked
-                                      ? "Leads can only delete their own work orders."
-                                      : "Delete"
-                                  }
+                                  title={leadBlocked ? "Leads can only delete their own work orders." : "Delete"}
                                 >
                                   Delete
                                 </button>
