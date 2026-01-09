@@ -98,22 +98,6 @@ export default function Page() {
 
   const isSuperAdmin = currentUser?.accessRole === "Super Admin";
 
-  // ✅ URL Guard (client-side): if non-super admin is on a blocked page, force back to dashboard
-  useEffect(() => {
-    if (!currentUser) return;
-    if (isSuperAdmin) return;
-
-    const path =
-      typeof window !== "undefined" ? window.location.pathname : "/";
-
-    const isBlocked =
-      NON_SUPER_BLOCKED_ROUTES.some(
-        (blocked) => path === blocked || path.startsWith(blocked + "/")
-      ) || !NON_SUPER_ALLOWED_ROUTES.has(path);
-
-    if (isBlocked) router.replace("/");
-  }, [currentUser, isSuperAdmin, router]);
-
   // Role info (leave your logic intact)
   const isLead = currentUser?.accessRole === "Lead";
   const isHQ =
@@ -122,9 +106,29 @@ export default function Page() {
 
   const userBuilding = currentUser?.building || "";
 
-  // ✅ Remove set-state-in-effect lint by not syncing buildingFilter in an effect.
-  // If role/building changes at runtime, the dropdown still works (HQ can switch).
-  // Non-HQ is locked via disabled select + options filtering.
+  // ✅ URL Guard (client-side): if non-super admin is on a blocked page, force back to dashboard
+  // ✅ ALSO: if Lead tries /containers, redirect them to /work-orders (prevents confusion)
+  useEffect(() => {
+    if (!currentUser) return;
+    if (isSuperAdmin) return;
+
+    const path =
+      typeof window !== "undefined" ? window.location.pathname : "/";
+
+    // Lead-specific block: containers page is hidden/blocked for Leads
+    if (isLead && (path === "/containers" || path.startsWith("/containers/"))) {
+      router.replace("/work-orders");
+      return;
+    }
+
+    const isBlocked =
+      NON_SUPER_BLOCKED_ROUTES.some(
+        (blocked) => path === blocked || path.startsWith(blocked + "/")
+      ) || !NON_SUPER_ALLOWED_ROUTES.has(path);
+
+    if (isBlocked) router.replace("/");
+  }, [currentUser, isSuperAdmin, isLead, router]);
+
   const [buildingFilter, setBuildingFilter] = useState<string>(() => {
     return isHQ ? "ALL" : userBuilding || "ALL";
   });
@@ -151,7 +155,6 @@ export default function Page() {
   );
 
   // Optional: keep state in sync if other tabs/pages update localStorage.
-  // This is a subscription to an external system (storage event) ✅
   useEffect(() => {
     if (typeof window === "undefined") return;
 
@@ -326,382 +329,329 @@ export default function Page() {
     <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-950 to-slate-900 text-slate-50">
       <div className="mx-auto max-w-7xl flex">
         {/* SIDEBAR */}
-        <aside className="w-64 border-r border-slate-800 bg-slate-950/80 p-4 flex flex-col gap-4 backdrop-blur-sm">
-          <div>
+        <aside className="w-72 border-r border-slate-800 bg-slate-950/80 p-5 flex flex-col gap-4 backdrop-blur-sm">
+          <div className="space-y-1">
             <div className="text-xs font-semibold text-sky-300 tracking-wide">
               Precision Pulse
             </div>
-            <div className="text-lg font-semibold text-slate-50">3PL Operations</div>
-            <div className="mt-1 text-[11px] text-slate-500">
-              Enterprise LMS / WMS spine for containers & workforce.
+            <div className="text-lg font-semibold text-slate-50 leading-tight">
+              3PL Operations
+            </div>
+            <div className="text-[11px] text-slate-500 leading-relaxed">
+              Containers • workforce • quality • HR workflows — in one place.
             </div>
           </div>
 
-          <nav className="space-y-1 text-sm">
-            <Link
-              href="/"
-              className="block px-3 py-2 rounded-lg bg-slate-900 text-slate-50 shadow-sm shadow-slate-900/60 border border-slate-800 transition-colors"
-            >
-              Dashboard
-            </Link>
+          {/* Role banner (visual-only, no behavior changes) */}
+          {isLead ? (
+            <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-3">
+              <div className="text-[11px] text-slate-300 font-semibold">Lead Entry</div>
+              <div className="text-[11px] text-slate-500 mt-1 leading-relaxed">
+                Enter containers <span className="text-sky-300 font-semibold">inside Work Orders</span> to avoid
+                duplicates.
+              </div>
+              <Link
+                href="/work-orders"
+                className="mt-2 inline-flex items-center gap-2 rounded-lg bg-sky-600 hover:bg-sky-500 px-3 py-1.5 text-[11px] text-white font-medium"
+              >
+                Go to Work Orders →
+              </Link>
+            </div>
+          ) : (
+            <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-3">
+              <div className="text-[11px] text-slate-300 font-semibold">Quick Start</div>
+              <div className="text-[11px] text-slate-500 mt-1 leading-relaxed">
+                Use <span className="text-sky-300 font-semibold">Work Orders</span> for grouped entry and review.
+              </div>
+              <div className="mt-2 flex flex-wrap gap-2">
+                <Link
+                  href="/work-orders"
+                  className="inline-flex items-center gap-2 rounded-lg bg-slate-800 hover:bg-slate-700 px-3 py-1.5 text-[11px] text-slate-100"
+                >
+                  Work Orders →
+                </Link>
 
-            <Link
-              href="/containers"
-              className="block px-3 py-2 rounded-lg text-slate-300 hover:bg-slate-800 hover:text-sky-200 transition-colors"
-            >
-              Containers
-            </Link>
+                {/* ✅ Containers shortcut hidden for Leads (only shows for non-leads) */}
+                {!isLead && (
+                  <Link
+                    href="/containers"
+                    className="inline-flex items-center gap-2 rounded-lg bg-slate-800 hover:bg-slate-700 px-3 py-1.5 text-[11px] text-slate-100"
+                  >
+                    Containers →
+                  </Link>
+                )}
+              </div>
+            </div>
+          )}
 
-            <Link
-              href="/work-orders"
-              className="block px-3 py-2 rounded-lg text-slate-300 hover:bg-slate-800 hover:text-sky-200 transition-colors"
-            >
-              Work Orders
-            </Link>
+          <div className="mt-1">
+            <div className="text-[10px] uppercase tracking-wide text-slate-600 mb-2">
+              Navigation
+            </div>
+            <nav className="space-y-1 text-sm">
+              <NavItem href="/" active>
+                Dashboard
+              </NavItem>
 
-            <Link
-              href="/training"
-              className="block px-3 py-2 rounded-lg text-slate-300 hover:bg-slate-800 hover:text-sky-200 transition-colors"
-            >
-              Training
-            </Link>
+              <NavItem href="/work-orders">Work Orders</NavItem>
 
-            <Link
-              href="/damage-reports"
-              className="block px-3 py-2 rounded-lg text-slate-300 hover:bg-slate-800 hover:text-sky-200 transition-colors"
-            >
-              Damage Reports
-            </Link>
+              {/* ✅ Hide Containers nav item for Leads */}
+              {!isLead && <NavItem href="/containers">Containers</NavItem>}
 
-            <Link
-              href="/startup-checklists"
-              className="block px-3 py-2 rounded-lg text-slate-300 hover:bg-slate-800 hover:text-sky-200 transition-colors"
-            >
-              Startup Meetings
-            </Link>
+              <div className="pt-2 mt-2 border-t border-slate-800/80">
+                <div className="text-[10px] uppercase tracking-wide text-slate-600 mb-2">
+                  Operations
+                </div>
+                <NavItem href="/damage-reports">Damage Reports</NavItem>
+                <NavItem href="/startup-checklists">Startup Meetings</NavItem>
+                <NavItem href="/training">Training</NavItem>
+                <NavItem href="/chats">Chats</NavItem>
+              </div>
 
-            <Link
-              href="/chats"
-              className="block px-3 py-2 rounded-lg text-slate-300 hover:bg-slate-800 hover:text-sky-200 transition-colors"
-            >
-              Chats
-            </Link>
+              {isSuperAdmin && (
+                <div className="pt-2 mt-2 border-t border-slate-800/80">
+                  <div className="text-[10px] uppercase tracking-wide text-slate-600 mb-2">
+                    Admin
+                  </div>
+                  <NavItem href="/shifts">Shifts</NavItem>
+                  <NavItem href="/staffing">Staffing Coverage</NavItem>
+                  <NavItem href="/workforce">Workforce</NavItem>
+                  <NavItem href="/hiring">Hiring</NavItem>
+                  <NavItem href="/terminations">Terminations</NavItem>
+                  <NavItem href="/reports">Reports</NavItem>
+                  <NavItem href="/admin">Admin / Backup</NavItem>
+                  <NavItem href="/user-accounts" emphasize>
+                    User Accounts
+                  </NavItem>
+                </div>
+              )}
+            </nav>
+          </div>
 
-            {/* ✅ Super Admin ONLY sees everything else exactly like before */}
-            {isSuperAdmin && (
-              <>
-                <Link
-                  href="/shifts"
-                  className="block px-3 py-2 rounded-lg text-slate-300 hover:bg-slate-800 hover:text-sky-200 transition-colors"
-                >
-                  Shifts
-                </Link>
-                <Link
-                  href="/staffing"
-                  className="block px-3 py-2 rounded-lg text-slate-300 hover:bg-slate-800 hover:text-sky-200 transition-colors"
-                >
-                  Staffing Coverage
-                </Link>
-                <Link
-                  href="/workforce"
-                  className="block px-3 py-2 rounded-lg text-slate-300 hover:bg-slate-800 hover:text-sky-200 transition-colors"
-                >
-                  Workforce
-                </Link>
-                <Link
-                  href="/hiring"
-                  className="block px-3 py-2 rounded-lg text-slate-300 hover:bg-slate-800 hover:text-sky-200 transition-colors"
-                >
-                  Hiring
-                </Link>
-                <Link
-                  href="/terminations"
-                  className="block px-3 py-2 rounded-lg text-slate-300 hover:bg-slate-800 hover:text-sky-200 transition-colors"
-                >
-                  Terminations
-                </Link>
-                <Link
-                  href="/reports"
-                  className="block px-3 py-2 rounded-lg text-slate-300 hover:bg-slate-800 hover:text-sky-200 transition-colors"
-                >
-                  Reports
-                </Link>
-                <Link
-                  href="/admin"
-                  className="block px-3 py-2 rounded-lg text-slate-300 hover:bg-slate-800 hover:text-sky-200 transition-colors"
-                >
-                  Admin / Backup
-                </Link>
-                <Link
-                  href="/user-accounts"
-                  className="block px-3 py-2 rounded-lg text-slate-200 hover:bg-slate-800 hover:text-sky-200 transition-colors border border-slate-700/80"
-                >
-                  User Accounts
-                </Link>
-              </>
-            )}
-          </nav>
+          <div className="mt-auto pt-3 border-t border-slate-800/80">
+            <div className="flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <div className="text-[11px] text-slate-200 truncate">
+                  {currentUser.name}{" "}
+                  {currentUser.accessRole && (
+                    <span className="ml-1 inline-flex items-center rounded-full border border-slate-700 bg-slate-900 px-2 py-0.5 text-[10px] text-sky-200">
+                      {currentUser.accessRole}
+                    </span>
+                  )}
+                </div>
+                <div className="text-[10px] text-slate-500 truncate">
+                  {currentUser.email} · {currentUser.building || "No building set"}
+                </div>
+              </div>
+              <button
+                onClick={handleLogout}
+                className="text-[11px] px-3 py-1.5 rounded-full border border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800 shrink-0"
+              >
+                Logout
+              </button>
+            </div>
+          </div>
         </aside>
 
         {/* MAIN DASHBOARD */}
         <main className="flex-1 p-6 space-y-6">
           {/* Header */}
-          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
-            <div>
-              <h1 className="text-2xl font-semibold text-slate-50">
-                Precision Pulse Dashboard
-              </h1>
-              <p className="text-sm text-slate-400">
-                Live overview of workforce, containers, damage, and HR workflows
-                across{" "}
-                <span className="font-semibold text-sky-300">{buildingLabel}</span>.
-              </p>
-              {isLead && currentUser.building && (
-                <p className="text-[11px] text-slate-500 mt-1">
-                  As a Lead, you are restricted to{" "}
-                  <span className="font-semibold text-sky-300">
-                    {currentUser.building}
-                  </span>{" "}
-                  only.
+          <div className="flex flex-col gap-3">
+            <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-3">
+              <div className="space-y-1">
+                <h1 className="text-2xl font-semibold text-slate-50">Dashboard</h1>
+                <p className="text-sm text-slate-400">
+                  Live overview across{" "}
+                  <span className="font-semibold text-sky-300">{buildingLabel}</span>.
                 </p>
-              )}
-            </div>
+                {isLead && currentUser.building && (
+                  <p className="text-[11px] text-slate-500">
+                    Lead access is restricted to{" "}
+                    <span className="font-semibold text-sky-300">
+                      {currentUser.building}
+                    </span>
+                    .
+                  </p>
+                )}
+              </div>
 
-            <div className="flex flex-col items-end gap-2">
-              <div className="flex items-center gap-3">
-                <div className="text-right">
-                  <div className="text-[11px] text-slate-300">
-                    {currentUser.name}{" "}
-                    {currentUser.accessRole && (
-                      <span className="ml-1 inline-flex items-center rounded-full border border-slate-700 bg-slate-900 px-2 py-0.5 text-[10px] text-sky-200">
-                        {currentUser.accessRole}
-                      </span>
-                    )}
-                  </div>
-                  <div className="text-[10px] text-slate-500">
-                    {currentUser.email} ·{" "}
-                    {currentUser.building || "No building set"}
-                  </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <Pill>
+                  Today: <span className="font-mono text-slate-200">{todayStr}</span>
+                </Pill>
+
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] text-slate-500">View:</span>
+                  <select
+                    className="rounded-lg bg-slate-900 border border-slate-700 px-3 py-1.5 text-xs text-slate-50 shadow-sm shadow-slate-900/50"
+                    value={buildingFilter}
+                    onChange={(e) => setBuildingFilter(e.target.value)}
+                    disabled={!isHQ && !!userBuilding}
+                  >
+                    {isHQ && <option value="ALL">All Buildings</option>}
+                    {BUILDINGS.map((b) => {
+                      if (!isHQ && userBuilding && b !== userBuilding) return null;
+                      return (
+                        <option key={b} value={b}>
+                          {b}
+                        </option>
+                      );
+                    })}
+                  </select>
                 </div>
-                <button
-                  onClick={handleLogout}
-                  className="text-[11px] px-3 py-1.5 rounded-full border border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800"
-                >
-                  Logout
-                </button>
-              </div>
-
-              <div className="flex items-center gap-2">
-                <span className="text-[11px] text-slate-500">View:</span>
-                <select
-                  className="rounded-lg bg-slate-900 border border-slate-700 px-3 py-1.5 text-xs text-slate-50 shadow-sm shadow-slate-900/50"
-                  value={buildingFilter}
-                  onChange={(e) => setBuildingFilter(e.target.value)}
-                  disabled={!isHQ && !!userBuilding}
-                >
-                  {isHQ && <option value="ALL">All Buildings</option>}
-
-                  {BUILDINGS.map((b) => {
-                    if (!isHQ && userBuilding && b !== userBuilding) return null;
-                    return (
-                      <option key={b} value={b}>
-                        {b}
-                      </option>
-                    );
-                  })}
-                </select>
-
-                <span className="text-[11px] text-slate-500">
-                  Today:{" "}
-                  <span className="text-slate-200 font-mono">{todayStr}</span>
-                </span>
               </div>
             </div>
-          </div>
 
-          {/* Quick Actions row (restricted for non-super) */}
-          <div className="flex flex-wrap gap-2 text-xs">
-            <QuickLink href="/containers" label="Containers" sub="Enter volume & lumpers" />
-            {isSuperAdmin && (
-              <>
-                <QuickLink href="/staffing" label="Staffing Coverage" sub="Required vs actual" />
-                <QuickLink href="/reports" label="Reports" sub="Pay · PPH · Leaders" />
-                <QuickLink href="/workforce" label="Workforce" sub="Roster & roles" />
-              </>
-            )}
-            <QuickLink href="/training" label="Training" sub="Compliance matrix" />
-          </div>
+            {/* Quick Actions (clean cards) */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <ActionCard
+                title="Enter Work"
+                desc={
+                  isLead
+                    ? "Add containers inside a work order (recommended)."
+                    : "Create work orders and add containers."
+                }
+                href="/work-orders"
+                cta="Open Work Orders →"
+              />
 
-          {/* Top KPI row */}
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-            <CardKpi>
-              <div className="text-xs text-slate-400 mb-1">Active Workforce</div>
-              <div className="text-2xl font-semibold text-emerald-300">
-                {metrics.activeWorkers}
-              </div>
-              <div className="text-[11px] text-slate-500 mt-1">
-                Total workers: {metrics.totalWorkers}
-              </div>
-              {isSuperAdmin && (
-                <Link
-                  href="/workforce"
-                  className="mt-3 inline-block text-[11px] text-sky-300 hover:underline"
-                >
-                  View Workforce →
-                </Link>
+              {/* ✅ Hide Containers action card for Leads */}
+              {!isLead ? (
+                <ActionCard
+                  title="Review Containers"
+                  desc="View container totals and worker payouts."
+                  href="/containers"
+                  cta="Open Containers →"
+                />
+              ) : (
+                <ActionCard
+                  title="Container Entry"
+                  desc="Container entry is done inside Work Orders to keep everything organized."
+                  href="/work-orders"
+                  cta="Go to Work Orders →"
+                />
               )}
-            </CardKpi>
 
-            <CardKpi>
-              <div className="text-xs text-slate-400 mb-1">Open Damage Reports</div>
-              <div className="text-2xl font-semibold text-amber-300">
-                {metrics.openDamageReports}
-              </div>
-              <div className="text-[11px] text-slate-500 mt-1">
-                Average damage: {metrics.avgDamagePercent}%
-              </div>
-              <Link
+              <ActionCard
+                title="Quality & Damage"
+                desc="Track open items and resolve reports."
                 href="/damage-reports"
-                className="mt-3 inline-block text-[11px] text-sky-300 hover:underline"
-              >
-                View Damage →
-              </Link>
-            </CardKpi>
-
-            <CardKpi>
-              <div className="text-xs text-slate-400 mb-1">Terminations In Progress</div>
-              <div className="text-2xl font-semibold text-rose-300">
-                {metrics.termInProgress}
-              </div>
-              <div className="text-[11px] text-slate-500 mt-1">
-                Completed: {metrics.termCompleted}
-              </div>
-              {isSuperAdmin && (
-                <Link
-                  href="/terminations"
-                  className="mt-3 inline-block text-[11px] text-sky-300 hover:underline"
-                >
-                  View Terminations →
-                </Link>
-              )}
-            </CardKpi>
-
-            <CardKpi>
-              <div className="text-xs text-slate-400 mb-1">Chat Activity Today</div>
-              <div className="text-2xl font-semibold text-sky-300">
-                {metrics.chatsTodayCount}
-              </div>
-              <div className="text-[11px] text-slate-500 mt-1">
-                Messages in {buildingLabel}
-              </div>
-              <Link
-                href="/chats"
-                className="mt-3 inline-block text-[11px] text-sky-300 hover:underline"
-              >
-                Open Chats →
-              </Link>
-            </CardKpi>
+                cta="Open Damage Reports →"
+              />
+            </div>
           </div>
 
-          {/* Second row */}
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            <CardPanel className="space-y-4">
-              <div className="flex items-center justify-between">
-                <h2 className="text-sm font-semibold text-slate-100">
-                  Operations Snapshot
-                </h2>
-                <span className="text-[11px] text-slate-500">
-                  Containers · Work Orders · Throughput
-                </span>
+          {/* KPI strip */}
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+            <KpiCard
+              label="Active Workforce"
+              value={String(metrics.activeWorkers)}
+              sub={`Total workers: ${metrics.totalWorkers}`}
+              href={isSuperAdmin ? "/workforce" : undefined}
+              linkText={isSuperAdmin ? "View Workforce →" : undefined}
+              accent="emerald"
+            />
+
+            <KpiCard
+              label="Open Damage Reports"
+              value={String(metrics.openDamageReports)}
+              sub={`Avg damage: ${metrics.avgDamagePercent}%`}
+              href="/damage-reports"
+              linkText="View Damage →"
+              accent="amber"
+            />
+
+            <KpiCard
+              label="Terminations In Progress"
+              value={String(metrics.termInProgress)}
+              sub={`Completed: ${metrics.termCompleted}`}
+              href={isSuperAdmin ? "/terminations" : undefined}
+              linkText={isSuperAdmin ? "View Terminations →" : undefined}
+              accent="rose"
+            />
+
+            <KpiCard
+              label="Chat Activity Today"
+              value={String(metrics.chatsTodayCount)}
+              sub={`Messages in ${buildingLabel}`}
+              href="/chats"
+              linkText="Open Chats →"
+              accent="sky"
+            />
+          </div>
+
+          {/* Two-column content */}
+          <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
+            {/* Left: Ops snapshot */}
+            <Panel className="xl:col-span-1 space-y-4">
+              <div className="flex items-end justify-between">
+                <div>
+                  <h2 className="text-sm font-semibold text-slate-100">
+                    Operations Snapshot
+                  </h2>
+                  <p className="text-[11px] text-slate-500">
+                    Containers • Work Orders • Throughput
+                  </p>
+                </div>
+                <Pill subtle>{buildingLabel}</Pill>
               </div>
 
-              <div className="grid grid-cols-3 gap-3 text-sm">
-                <CardMini>
-                  <div className="text-[11px] text-slate-400 mb-1">Total Containers</div>
-                  <div className="text-lg font-semibold text-slate-100">
-                    {metrics.containersTotal}
-                  </div>
-                  <Link href="/containers" className="text-[11px] text-sky-300 hover:underline">
-                    Go to Containers →
-                  </Link>
-                </CardMini>
+              <div className="grid grid-cols-1 gap-3">
+                <MiniStat
+                  title="Work Orders (Open)"
+                  value={`${metrics.workOrdersOpen}`}
+                  sub={`Total: ${metrics.workOrdersTotal}`}
+                  href="/work-orders"
+                  link="Go to Work Orders →"
+                />
 
-                <CardMini>
-                  <div className="text-[11px] text-slate-400 mb-1">Work Orders (Open)</div>
-                  <div className="text-lg font-semibold text-emerald-300">
-                    {metrics.workOrdersOpen}
-                  </div>
-                  <div className="text-[11px] text-slate-500 mb-1">
-                    Total: {metrics.workOrdersTotal}
-                  </div>
-                  <Link href="/work-orders" className="text-[11px] text-sky-300 hover:underline">
-                    Go to Work Orders →
-                  </Link>
-                </CardMini>
+                {/* ✅ For Leads, keep the metric but route to Work Orders (no Containers page access) */}
+                <MiniStat
+                  title="Total Containers"
+                  value={`${metrics.containersTotal}`}
+                  sub={`Today: ${metrics.containersToday} · Pieces: ${metrics.piecesToday}`}
+                  href={isLead ? "/work-orders" : "/containers"}
+                  link={isLead ? "Go to Work Orders →" : "Go to Containers →"}
+                />
 
-                <CardMini>
-                  <div className="text-[11px] text-slate-400 mb-1">Containers Today</div>
-                  <div className="text-lg font-semibold text-sky-300">
-                    {metrics.containersToday}
-                  </div>
-                  <div className="text-[11px] text-slate-500">
-                    Pieces today:{" "}
-                    <span className="text-slate-100">{metrics.piecesToday}</span>
-                  </div>
-                </CardMini>
+                <MiniStat
+                  title="Throughput Today"
+                  value={`${metrics.pphToday.toFixed(1)} PPH`}
+                  sub={`Minutes logged: ${metrics.minutesToday}`}
+                  href={isSuperAdmin ? "/reports" : "/"}
+                  link="See details →"
+                />
+
+                <MiniStat
+                  title="Startup Meetings Today"
+                  value={`${metrics.startupTodayCompleted}/${metrics.startupTodayTotal} completed`}
+                  sub={buildingLabel}
+                  href="/startup-checklists"
+                  link="View Checklists →"
+                />
               </div>
+            </Panel>
 
-              <CardMini>
-                <div className="flex items-center justify-between">
-                  <div>
-                    <div className="text-slate-300 mb-1 text-xs">Throughput (Today)</div>
-                    <div className="text-[11px] text-slate-400">
-                      PPH:{" "}
-                      <span className="text-sky-300 font-semibold">
-                        {metrics.pphToday.toFixed(1)}
-                      </span>{" "}
-                      · Minutes logged:{" "}
-                      <span className="text-slate-100">{metrics.minutesToday}</span>
-                    </div>
-                  </div>
-
-                  {isSuperAdmin ? (
-                    <Link href="/reports" className="text-[11px] text-sky-300 hover:underline">
-                      See details →
-                    </Link>
-                  ) : (
-                    <Link href="/" className="text-[11px] text-slate-500 hover:text-slate-300">
-                      See details →
-                    </Link>
-                  )}
+            {/* Right: People & Compliance */}
+            <Panel className="xl:col-span-2 space-y-4">
+              <div className="flex items-end justify-between">
+                <div>
+                  <h2 className="text-sm font-semibold text-slate-100">
+                    People & Compliance
+                  </h2>
+                  <p className="text-[11px] text-slate-500">
+                    Workforce · Training · HR
+                  </p>
                 </div>
-              </CardMini>
-
-              <CardMini>
-                <div className="text-slate-300 mb-1 text-xs">Startup Meetings Today</div>
-                <div className="flex items-center justify-between">
-                  <div>
-                    <div className="text-slate-100 text-sm font-semibold">
-                      {metrics.startupTodayCompleted}/{metrics.startupTodayTotal} completed
-                    </div>
-                    <div className="text-[11px] text-slate-500">{buildingLabel}</div>
-                  </div>
-                  <Link href="/startup-checklists" className="text-[11px] text-sky-300 hover:underline">
-                    View Checklists →
-                  </Link>
+                <div className="hidden md:flex gap-2">
+                  <Pill subtle>Active: {metrics.activeWorkers}</Pill>
+                  <Pill subtle>Open Damage: {metrics.openDamageReports}</Pill>
                 </div>
-              </CardMini>
-            </CardPanel>
-
-            <CardPanel className="space-y-4 lg:col-span-2">
-              <div className="flex items-center justify-between">
-                <h2 className="text-sm font-semibold text-slate-100">People & Compliance</h2>
-                <span className="text-[11px] text-slate-500">Workforce · Training · HR</span>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
-                <CardMini>
-                  <div className="text-slate-300 mb-1">Workforce Overview</div>
+                <MiniCard>
+                  <div className="text-slate-300 mb-1 font-semibold">Workforce</div>
                   <div className="text-slate-400">
                     Active: <span className="text-emerald-300">{metrics.activeWorkers}</span>
                   </div>
@@ -709,14 +659,17 @@ export default function Page() {
                     Total: <span className="text-slate-100">{metrics.totalWorkers}</span>
                   </div>
                   {isSuperAdmin && (
-                    <Link href="/workforce" className="mt-2 inline-block text-[11px] text-sky-300 hover:underline">
+                    <Link
+                      href="/workforce"
+                      className="mt-2 inline-block text-[11px] text-sky-300 hover:underline"
+                    >
                       Manage Workforce →
                     </Link>
                   )}
-                </CardMini>
+                </MiniCard>
 
-                <CardMini>
-                  <div className="text-slate-300 mb-1">Termination Workflows</div>
+                <MiniCard>
+                  <div className="text-slate-300 mb-1 font-semibold">Terminations</div>
                   <div className="text-slate-400">
                     In Progress: <span className="text-rose-300">{metrics.termInProgress}</span>
                   </div>
@@ -724,37 +677,46 @@ export default function Page() {
                     Completed: <span className="text-emerald-300">{metrics.termCompleted}</span>
                   </div>
                   {isSuperAdmin && (
-                    <Link href="/terminations" className="mt-2 inline-block text-[11px] text-sky-300 hover:underline">
+                    <Link
+                      href="/terminations"
+                      className="mt-2 inline-block text-[11px] text-sky-300 hover:underline"
+                    >
                       View Terminations →
                     </Link>
                   )}
-                </CardMini>
+                </MiniCard>
 
-                <CardMini>
-                  <div className="text-slate-300 mb-1">Training & Readiness</div>
-                  <div className="text-slate-400">(Hook to Training data later)</div>
-                  <Link href="/training" className="mt-2 inline-block text-[11px] text-sky-300 hover:underline">
+                <MiniCard>
+                  <div className="text-slate-300 mb-1 font-semibold">Training</div>
+                  <div className="text-slate-400">Compliance matrix + readiness.</div>
+                  <Link
+                    href="/training"
+                    className="mt-2 inline-block text-[11px] text-sky-300 hover:underline"
+                  >
                     Go to Training →
                   </Link>
-                </CardMini>
+                </MiniCard>
               </div>
 
-              <CardMini>
-                <div className="flex items-center justify-between">
-                  <div>
-                    <div className="text-slate-300 mb-1">Quality & Damage</div>
-                    <div className="text-slate-400">
+              <MiniCard>
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="text-slate-300 mb-1 font-semibold">Quality & Damage</div>
+                    <div className="text-slate-400 text-[11px] leading-relaxed">
                       Open/Review: <span className="text-amber-300">{metrics.openDamageReports}</span> · Total:{" "}
                       <span className="text-slate-100">{metrics.totalDamageReports}</span> · Avg Damage:{" "}
                       <span className="text-amber-300">{metrics.avgDamagePercent}%</span>
                     </div>
                   </div>
-                  <Link href="/damage-reports" className="text-[11px] text-sky-300 hover:underline">
-                    Open Damage Reports →
+                  <Link
+                    href="/damage-reports"
+                    className="text-[11px] text-sky-300 hover:underline shrink-0"
+                  >
+                    Open →
                   </Link>
                 </div>
-              </CardMini>
-            </CardPanel>
+              </MiniCard>
+            </Panel>
           </div>
         </main>
       </div>
@@ -762,57 +724,158 @@ export default function Page() {
   );
 }
 
-/** Small components just for nicer styling & less repetition */
+/** ---------------- Components (visual-only) ---------------- */
 
-function CardKpi({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="rounded-2xl bg-slate-900 border border-slate-800 p-4 shadow-sm shadow-slate-900/50 transition-transform transition-shadow duration-150 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-slate-900/70">
-      {children}
-    </div>
-  );
-}
-
-function CardPanel({
-  children,
-  className = "",
-}: {
-  children: React.ReactNode;
-  className?: string;
-}) {
-  return (
-    <div
-      className={`bg-slate-900/95 border border-slate-800 rounded-2xl p-6 shadow-sm shadow-slate-900/50 transition-transform transition-shadow duration-150 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-slate-900/70 ${className}`}
-    >
-      {children}
-    </div>
-  );
-}
-
-function CardMini({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="rounded-xl bg-slate-950 border border-slate-800 p-3 shadow-sm shadow-slate-900/40 transition-transform duration-150 hover:-translate-y-0.5">
-      {children}
-    </div>
-  );
-}
-
-function QuickLink({
+function NavItem({
   href,
-  label,
-  sub,
+  children,
+  active,
+  emphasize,
 }: {
   href: string;
-  label: string;
-  sub: string;
+  children: React.ReactNode;
+  active?: boolean;
+  emphasize?: boolean;
 }) {
+  const base =
+    "block px-3 py-2 rounded-lg transition-colors text-sm border border-transparent";
+  const activeCls =
+    "bg-slate-900 text-slate-50 shadow-sm shadow-slate-900/60 border-slate-800";
+  const normalCls = "text-slate-300 hover:bg-slate-800 hover:text-sky-200";
+  const emphCls =
+    "text-slate-200 hover:bg-slate-800 hover:text-sky-200 border border-slate-700/80";
+
   return (
     <Link
       href={href}
-      className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full border border-slate-800 bg-slate-950/80 text-[11px] text-slate-200 hover:border-sky-500 hover:bg-slate-900/90 hover:text-sky-200 transition-colors shadow-sm shadow-slate-900/40"
+      className={`${base} ${active ? activeCls : emphasize ? emphCls : normalCls}`}
     >
-      <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-      <span className="font-medium">{label}</span>
-      <span className="text-[10px] text-slate-500">{sub}</span>
+      {children}
     </Link>
+  );
+}
+
+function Pill({ children, subtle }: { children: React.ReactNode; subtle?: boolean }) {
+  return (
+    <span
+      className={
+        subtle
+          ? "inline-flex items-center rounded-full border border-slate-800 bg-slate-950/70 px-3 py-1 text-[11px] text-slate-300"
+          : "inline-flex items-center rounded-full border border-slate-700 bg-slate-900 px-3 py-1 text-[11px] text-slate-200 shadow-sm shadow-slate-900/40"
+      }
+    >
+      {children}
+    </span>
+  );
+}
+
+function Panel({ children, className = "" }: { children: React.ReactNode; className?: string }) {
+  return (
+    <div
+      className={`bg-slate-900/95 border border-slate-800 rounded-2xl p-6 shadow-sm shadow-slate-900/50 ${className}`}
+    >
+      {children}
+    </div>
+  );
+}
+
+function MiniCard({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="rounded-xl bg-slate-950 border border-slate-800 p-4 shadow-sm shadow-slate-900/40">
+      {children}
+    </div>
+  );
+}
+
+function ActionCard({
+  title,
+  desc,
+  href,
+  cta,
+}: {
+  title: string;
+  desc: string;
+  href: string;
+  cta: string;
+}) {
+  return (
+    <div className="rounded-2xl bg-slate-900 border border-slate-800 p-4 shadow-sm shadow-slate-900/40">
+      <div className="text-sm font-semibold text-slate-100">{title}</div>
+      <div className="mt-1 text-[11px] text-slate-500 leading-relaxed">{desc}</div>
+      <Link
+        href={href}
+        className="mt-3 inline-flex items-center justify-between w-full rounded-xl bg-slate-950 border border-slate-800 px-3 py-2 text-[11px] text-sky-300 hover:bg-slate-900/60"
+      >
+        <span>{cta}</span>
+        <span className="text-slate-500">→</span>
+      </Link>
+    </div>
+  );
+}
+
+function KpiCard({
+  label,
+  value,
+  sub,
+  href,
+  linkText,
+  accent,
+}: {
+  label: string;
+  value: string;
+  sub: string;
+  href?: string;
+  linkText?: string;
+  accent: "emerald" | "amber" | "rose" | "sky";
+}) {
+  const valueColor =
+    accent === "emerald"
+      ? "text-emerald-300"
+      : accent === "amber"
+      ? "text-amber-300"
+      : accent === "rose"
+      ? "text-rose-300"
+      : "text-sky-300";
+
+  return (
+    <div className="rounded-2xl bg-slate-900 border border-slate-800 p-4 shadow-sm shadow-slate-900/50 hover:shadow-lg hover:shadow-slate-900/70 transition-shadow">
+      <div className="text-xs text-slate-400">{label}</div>
+      <div className={`mt-1 text-2xl font-semibold ${valueColor}`}>{value}</div>
+      <div className="mt-1 text-[11px] text-slate-500">{sub}</div>
+      {href && linkText && (
+        <Link href={href} className="mt-3 inline-block text-[11px] text-sky-300 hover:underline">
+          {linkText}
+        </Link>
+      )}
+    </div>
+  );
+}
+
+function MiniStat({
+  title,
+  value,
+  sub,
+  href,
+  link,
+}: {
+  title: string;
+  value: string;
+  sub: string;
+  href: string;
+  link: string;
+}) {
+  return (
+    <div className="rounded-xl bg-slate-950 border border-slate-800 p-4 shadow-sm shadow-slate-900/40">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-[11px] text-slate-400">{title}</div>
+          <div className="mt-1 text-lg font-semibold text-slate-100">{value}</div>
+          <div className="mt-1 text-[11px] text-slate-500">{sub}</div>
+        </div>
+        <Link href={href} className="text-[11px] text-sky-300 hover:underline shrink-0">
+          {link}
+        </Link>
+      </div>
+    </div>
   );
 }

@@ -190,13 +190,20 @@ export default function ContainersPage() {
   const isLead = currentUser?.accessRole === "Lead";
   const leadBuilding = currentUser?.building || "";
 
+  /**
+   * ✅ NEW: hard-hide this page from Leads so they don't enter containers here.
+   * They will be redirected to Work Orders, and we show a short message while redirecting.
+   */
+  useEffect(() => {
+    if (!currentUser) return;
+    if (isLead) router.replace("/work-orders");
+  }, [currentUser, isLead, router]);
+
   function isOwner(row: ContainerRow): boolean {
     if (!currentUser) return false;
-    const byId =
-      !!row.created_by_user_id && row.created_by_user_id === currentUser.id;
+    const byId = !!row.created_by_user_id && row.created_by_user_id === currentUser.id;
     const byEmail =
-      !!row.created_by_email &&
-      row.created_by_email.toLowerCase() === currentUser.email.toLowerCase();
+      !!row.created_by_email && row.created_by_email.toLowerCase() === currentUser.email.toLowerCase();
     return byId || byEmail;
   }
 
@@ -284,10 +291,7 @@ export default function ContainersPage() {
     setError(null);
 
     try {
-      let query = supabase
-        .from("containers")
-        .select("*")
-        .order("created_at", { ascending: false });
+      let query = supabase.from("containers").select("*").order("created_at", { ascending: false });
 
       if (isLead && leadBuilding) {
         query = query.eq("building", leadBuilding);
@@ -369,9 +373,7 @@ export default function ContainersPage() {
             name:
               (typeof row.work_order_code === "string" ? row.work_order_code : null) ??
               `Work Order ${String(row.id).slice(-4)}`,
-            building:
-              (typeof row.building === "string" ? row.building : null) ??
-              (BUILDINGS[0] || "DC1"),
+            building: (typeof row.building === "string" ? row.building : null) ?? (BUILDINGS[0] || "DC1"),
             status: (typeof row.status === "string" ? row.status : null) ?? "Pending",
           })) ?? [];
 
@@ -390,10 +392,7 @@ export default function ContainersPage() {
     async function loadWorkforce() {
       setWorkforceLoading(true);
       try {
-        const { data, error } = await supabase
-          .from("workforce")
-          .select("*")
-          .order("created_at", { ascending: false });
+        const { data, error } = await supabase.from("workforce").select("*").order("created_at", { ascending: false });
 
         if (error) {
           logSupabase("Error loading workforce", error, "warn");
@@ -464,8 +463,7 @@ export default function ContainersPage() {
       return;
     }
 
-    const existingWorkers =
-      (row.workers || []).length > 0 ? (row.workers || []) : [blankWorker()];
+    const existingWorkers = (row.workers || []).length > 0 ? row.workers || [] : [blankWorker()];
 
     setFormState({
       id: row.id,
@@ -537,9 +535,7 @@ export default function ContainersPage() {
     if (!formState.containerNo.trim()) return setError("Container number is required.");
     if (formState.piecesTotal <= 0) return setError("Pieces total must be greater than 0.");
 
-    const finalWorkers = workersWithPayout.filter(
-      (w) => w.name.trim() && Number(w.percentContribution) > 0
-    );
+    const finalWorkers = workersWithPayout.filter((w) => w.name.trim() && Number(w.percentContribution) > 0);
 
     if (finalWorkers.length > 0 && !approxEqual(percentSum, 100, 0.02)) {
       setError("Worker contribution percentages must total 100% (decimals allowed).");
@@ -596,11 +592,7 @@ export default function ContainersPage() {
         let res = await supabase.from("containers").insert(createPayload).select("id").single();
 
         if (res.error && ownershipColsSupported && isMissingOwnershipColumnError(res.error)) {
-          logSupabase(
-            "Insert failed (ownership cols missing) — retrying without ownership",
-            res.error,
-            "warn"
-          );
+          logSupabase("Insert failed (ownership cols missing) — retrying without ownership", res.error, "warn");
           setOwnershipColsSupported(false);
           res = await supabase.from("containers").insert(basePayload).select("id").single();
         }
@@ -753,9 +745,7 @@ export default function ContainersPage() {
               return (
                 <tr key={c.id} className="border-b border-slate-800/60 hover:bg-slate-900/70">
                   <td className="py-2 pr-3 text-[11px] text-slate-400">
-                    {c.work_date
-                      ? String(c.work_date).slice(0, 10)
-                      : new Date(c.created_at).toISOString().slice(0, 10)}
+                    {c.work_date ? String(c.work_date).slice(0, 10) : new Date(c.created_at).toISOString().slice(0, 10)}
                   </td>
                   <td className="py-2 pr-3 text-[11px] text-slate-200">{c.building}</td>
                   <td className="py-2 pr-3 text-[11px] text-slate-200">{c.shift ?? "—"}</td>
@@ -770,9 +760,7 @@ export default function ContainersPage() {
                       .filter((w) => w.name)
                       .map(
                         (w) =>
-                          `${w.name} (${Number(w.percentContribution).toFixed(2)}% · $${Number(w.payout).toFixed(
-                            2
-                          )})`
+                          `${w.name} (${Number(w.percentContribution).toFixed(2)}% · $${Number(w.payout).toFixed(2)})`
                       )
                       .join(", ") || "—"}
                   </td>
@@ -818,6 +806,44 @@ export default function ContainersPage() {
     );
   }
 
+  /**
+   * ✅ NEW: lead-facing UI (in case they land here briefly, or JS redirect is blocked)
+   */
+  if (isLead) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center px-6">
+        <div className="max-w-lg w-full rounded-2xl border border-slate-800 bg-slate-900/60 p-6 space-y-3">
+          <div className="text-lg font-semibold">Containers entry moved</div>
+          <div className="text-sm text-slate-300">
+            To keep things simple, container entry is now done inside <span className="text-slate-100 font-semibold">Work Orders</span>.
+            This Containers page is hidden for Leads.
+          </div>
+
+          <div className="pt-2 flex gap-2">
+            <button
+              type="button"
+              onClick={() => router.replace("/work-orders")}
+              className="rounded-lg bg-sky-600 hover:bg-sky-500 text-[12px] font-medium text-white px-4 py-2"
+            >
+              Go to Work Orders
+            </button>
+            <button
+              type="button"
+              onClick={() => router.replace("/")}
+              className="rounded-lg border border-slate-700 px-4 py-2 text-[12px] text-slate-200 hover:bg-slate-800"
+            >
+              Back to Dashboard
+            </button>
+          </div>
+
+          <div className="text-[11px] text-slate-500">
+            If you believe you should have access, contact a Super Admin.
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-950 to-slate-900 text-slate-50">
       <div className="mx-auto max-w-6xl px-4 py-6 space-y-6">
@@ -853,17 +879,13 @@ export default function ContainersPage() {
               className="rounded-lg bg-slate-900 border border-slate-700 px-3 py-1.5 text-xs text-slate-50"
               value={buildingFilter}
               onChange={(e) => setBuildingFilter(e.target.value)}
-              disabled={isLead && !!leadBuilding}
             >
-              {!isLead && <option value="ALL">All Buildings</option>}
-              {BUILDINGS.map((b) => {
-                if (isLead && leadBuilding && b !== leadBuilding) return null;
-                return (
-                  <option key={b} value={b}>
-                    {b}
-                  </option>
-                );
-              })}
+              <option value="ALL">All Buildings</option>
+              {BUILDINGS.map((b) => (
+                <option key={b} value={b}>
+                  {b}
+                </option>
+              ))}
             </select>
           </div>
 
@@ -994,16 +1016,12 @@ export default function ContainersPage() {
                           workOrderId: null,
                         }))
                       }
-                      disabled={isLead && !!leadBuilding}
                     >
-                      {BUILDINGS.map((b) => {
-                        if (isLead && leadBuilding && b !== leadBuilding) return null;
-                        return (
-                          <option key={b} value={b}>
-                            {b}
-                          </option>
-                        );
-                      })}
+                      {BUILDINGS.map((b) => (
+                        <option key={b} value={b}>
+                          {b}
+                        </option>
+                      ))}
                     </select>
                   </div>
 
@@ -1012,12 +1030,7 @@ export default function ContainersPage() {
                     <select
                       className="w-full rounded-lg bg-slate-950 border border-slate-700 px-2 py-1.5 text-[11px] text-slate-50"
                       value={formState.shift}
-                      onChange={(e) =>
-                        setFormState((prev) => ({
-                          ...prev,
-                          shift: e.target.value as ShiftName,
-                        }))
-                      }
+                      onChange={(e) => setFormState((prev) => ({ ...prev, shift: e.target.value as ShiftName }))}
                     >
                       {SHIFTS.map((s) => (
                         <option key={s} value={s}>
@@ -1055,9 +1068,7 @@ export default function ContainersPage() {
                       type="number"
                       className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
                       value={formState.piecesTotal}
-                      onChange={(e) =>
-                        setFormState((prev) => ({ ...prev, piecesTotal: Number(e.target.value) || 0 }))
-                      }
+                      onChange={(e) => setFormState((prev) => ({ ...prev, piecesTotal: Number(e.target.value) || 0 }))}
                       min={0}
                     />
                   </div>
@@ -1068,9 +1079,7 @@ export default function ContainersPage() {
                       type="number"
                       className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
                       value={formState.skusTotal}
-                      onChange={(e) =>
-                        setFormState((prev) => ({ ...prev, skusTotal: Number(e.target.value) || 0 }))
-                      }
+                      onChange={(e) => setFormState((prev) => ({ ...prev, skusTotal: Number(e.target.value) || 0 }))}
                       min={0}
                     />
                   </div>
@@ -1120,9 +1129,7 @@ export default function ContainersPage() {
                       + Add Worker
                     </button>
 
-                    <div className="text-[10px] text-slate-500">
-                      Decimals allowed (ex: 33.33). Total must equal 100%.
-                    </div>
+                    <div className="text-[10px] text-slate-500">Decimals allowed (ex: 33.33). Total must equal 100%.</div>
                   </div>
 
                   <div className="grid grid-cols-1 md:grid-cols-5 gap-2 text-[11px] text-slate-400 font-semibold mb-1">
@@ -1187,10 +1194,7 @@ export default function ContainersPage() {
                       />
 
                       <div className="text-[11px] text-emerald-300">
-                        $
-                        {workersWithPayout[idx]
-                          ? Number(workersWithPayout[idx].payout).toFixed(2)
-                          : "0.00"}
+                        ${workersWithPayout[idx] ? Number(workersWithPayout[idx].payout).toFixed(2) : "0.00"}
                       </div>
                     </div>
                   ))}
