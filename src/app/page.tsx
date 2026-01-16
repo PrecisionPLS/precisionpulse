@@ -24,6 +24,7 @@ type LocalRow = Record<string, unknown>;
  * - Building Managers: NO containers page OR tab. Yes Workforce (to manage their building workers)
  * - Super Admin: full admin nav
  * - HQ/Admin: normal nav (containers allowed)
+ * - ✅ NEW: Worker History visible to everyone, scoped by building (Lead/BM)
  */
 
 // ✅ Non–Super Admins are only allowed to access these routes (client-side guard)
@@ -34,7 +35,8 @@ const NON_SUPER_ALLOWED_ROUTES = new Set<string>([
   "/damage-reports",
   "/startup-checklists",
   "/chats",
-  "/injury-report", // ✅ NEW: allow everyone to access injury reports page
+  "/injury-report",
+  "/worker-history", // ✅ NEW
   // NOTE: "/containers" stays allowed for non-super ONLY if they are HQ/Admin (handled in guard below)
 ]);
 
@@ -115,6 +117,9 @@ export default function Page() {
 
   // ✅ Workforce is visible/manageable for Building Managers + Super Admin
   const canSeeWorkforce = isBuildingManager || isSuperAdmin;
+
+  // ✅ Worker History visible to everyone (scoped by building for Lead/BM on that page)
+  const canSeeWorkerHistory = true;
 
   // ✅ URL Guard:
   useEffect(() => {
@@ -322,6 +327,16 @@ export default function Page() {
               >
                 Go to Work Orders →
               </Link>
+
+              {/* ✅ NEW: Worker History quick link */}
+              {canSeeWorkerHistory && (
+                <Link
+                  href="/worker-history"
+                  className="mt-2 inline-flex items-center gap-2 rounded-lg bg-slate-800 hover:bg-slate-700 px-3 py-1.5 text-[11px] text-slate-100"
+                >
+                  Worker History →
+                </Link>
+              )}
             </div>
           ) : isBuildingManager ? (
             <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-3">
@@ -337,6 +352,7 @@ export default function Page() {
                 >
                   Work Orders →
                 </Link>
+
                 {canSeeWorkforce && (
                   <Link
                     href="/workforce"
@@ -345,13 +361,23 @@ export default function Page() {
                     Workforce →
                   </Link>
                 )}
-                {/* ✅ NEW quick link */}
+
                 <Link
                   href="/injury-report"
                   className="inline-flex items-center gap-2 rounded-lg bg-slate-800 hover:bg-slate-700 px-3 py-1.5 text-[11px] text-slate-100"
                 >
                   Injury Report →
                 </Link>
+
+                {/* ✅ NEW */}
+                {canSeeWorkerHistory && (
+                  <Link
+                    href="/worker-history"
+                    className="inline-flex items-center gap-2 rounded-lg bg-slate-800 hover:bg-slate-700 px-3 py-1.5 text-[11px] text-slate-100"
+                  >
+                    Worker History →
+                  </Link>
+                )}
               </div>
             </div>
           ) : (
@@ -378,13 +404,22 @@ export default function Page() {
                   </Link>
                 )}
 
-                {/* ✅ NEW */}
                 <Link
                   href="/injury-report"
                   className="inline-flex items-center gap-2 rounded-lg bg-slate-800 hover:bg-slate-700 px-3 py-1.5 text-[11px] text-slate-100"
                 >
                   Injury Report →
                 </Link>
+
+                {/* ✅ NEW */}
+                {canSeeWorkerHistory && (
+                  <Link
+                    href="/worker-history"
+                    className="inline-flex items-center gap-2 rounded-lg bg-slate-800 hover:bg-slate-700 px-3 py-1.5 text-[11px] text-slate-100"
+                  >
+                    Worker History →
+                  </Link>
+                )}
               </div>
             </div>
           )}
@@ -404,8 +439,11 @@ export default function Page() {
               {/* ✅ Workforce nav ONLY for Building Managers (and Super Admin if you want) */}
               {canSeeWorkforce && <NavItem href="/workforce">Workforce</NavItem>}
 
-              {/* ✅ NEW: Injury Report visible to everyone */}
+              {/* ✅ Injury Report visible to everyone */}
               <NavItem href="/injury-report">Injury Report</NavItem>
+
+              {/* ✅ NEW: Worker History visible to everyone */}
+              {canSeeWorkerHistory && <NavItem href="/worker-history">Worker History</NavItem>}
 
               <div className="pt-2 mt-2 border-t border-slate-800/80">
                 <div className="text-[10px] uppercase tracking-wide text-slate-600 mb-2">Operations</div>
@@ -529,12 +567,22 @@ export default function Page() {
                 />
               )}
 
-              {/* ✅ NEW: Injury Report action card (everyone) */}
+              {/* Injury Report */}
               <ActionCard
                 title="Injury Report"
                 desc="Report injuries, attach documents, and print forms for signatures."
                 href="/injury-report"
                 cta="Open Injury Report →"
+              />
+            </div>
+
+            {/* ✅ NEW row: Worker History action card */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <ActionCard
+                title="Worker History"
+                desc="Click a worker to see every container they worked and earnings by container."
+                href="/worker-history"
+                cta="Open Worker History →"
               />
             </div>
           </div>
@@ -693,6 +741,21 @@ export default function Page() {
                 </div>
               </MiniCard>
 
+              {/* ✅ NEW: Worker History card */}
+              <MiniCard>
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="text-slate-300 mb-1 font-semibold">Worker History</div>
+                    <div className="text-slate-400 text-[11px] leading-relaxed">
+                      View each worker’s containers and earnings breakdown (read-only).
+                    </div>
+                  </div>
+                  <Link href="/worker-history" className="text-[11px] text-sky-300 hover:underline shrink-0">
+                    Open →
+                  </Link>
+                </div>
+              </MiniCard>
+
               <MiniCard>
                 <div className="flex items-center justify-between gap-3">
                   <div className="min-w-0">
@@ -825,7 +888,19 @@ function KpiCard({
   );
 }
 
-function MiniStat({ title, value, sub, href, link }: { title: string; value: string; sub: string; href: string; link: string }) {
+function MiniStat({
+  title,
+  value,
+  sub,
+  href,
+  link,
+}: {
+  title: string;
+  value: string;
+  sub: string;
+  href: string;
+  link: string;
+}) {
   return (
     <div className="rounded-xl bg-slate-950 border border-slate-800 p-4 shadow-sm shadow-slate-900/40">
       <div className="flex items-start justify-between gap-3">

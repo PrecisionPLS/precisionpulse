@@ -1198,8 +1198,8 @@ export default function InjuryReportPage() {
                         <input
                           type="checkbox"
                           className="h-4 w-4"
-                          checked={(form as any)[c.key] as boolean}
-                          onChange={(e) => setForm((p) => ({ ...(p as any), [c.key]: e.target.checked }))}
+                          checked={form[c.key as keyof typeof form] === true}
+                          onChange={(e) => setForm((p) => ({ ...p, [c.key]: e.target.checked }))}
                           disabled={readOnlyExisting}
                         />
                         {c.label}
