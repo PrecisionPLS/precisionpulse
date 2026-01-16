@@ -205,7 +205,8 @@ export default function InjuryReportPage() {
 
   // HR/Admin tier (keep)
   const canManageAll =
-    role === "Super Admin" || role === "Admin" || role === "HR" || role === "Director of Operations";
+  role === "HQ" ||
+  role === "Building Manager";
 
   // KEY RULES YOU ASKED FOR:
   // - ONLY Building Managers + Super Admin can edit/delete existing reports
