@@ -14,7 +14,7 @@ type ShiftName = (typeof SHIFTS)[number];
 type WorkerContribution = {
   name: string;
   minutesWorked: number;
-  percentContribution: number; // supports decimals (e.g., 33.33)
+  percentContribution: number;
   payout: number;
 };
 
@@ -23,7 +23,7 @@ type ContainerRow = {
   created_at: string;
   building: string;
   shift: string | null;
-  work_date: string | null; // YYYY-MM-DD
+  work_date: string | null;
   container_no: string;
   pieces_total: number;
   skus_total: number;
@@ -33,7 +33,9 @@ type ContainerRow = {
   rework_pieces: number;
   work_order_id: string | null;
 
-  // ownership fields (optional)
+  // ✅ NEW
+  palletized?: boolean | null;
+
   created_by_user_id?: string | null;
   created_by_email?: string | null;
 };
@@ -42,30 +44,22 @@ type EditFormState = {
   id?: string;
   building: string;
   shift: ShiftName;
-  workDate: string; // YYYY-MM-DD
+  workDate: string;
   containerNo: string;
   piecesTotal: number;
   skusTotal: number;
   workOrderId: string | null;
+
+  // ✅ NEW
+  palletized: boolean;
+
   workers: WorkerContribution[];
 };
 
-type WorkOrderOption = {
-  id: string;
-  name: string;
-  building: string;
-  status: string;
-};
+function calculateContainerPay(pieces: number, palletized: boolean): number {
+  // ✅ Palletized overrides everything
+  if (palletized) return 100;
 
-type WorkforceWorker = {
-  id: string;
-  fullName: string;
-  building: string | null;
-  shift: string | null;
-  active: boolean;
-};
-
-function calculateContainerPay(pieces: number): number {
   if (pieces <= 0) return 0;
   if (pieces <= 500) return 100;
   if (pieces <= 1500) return 130;
@@ -80,62 +74,6 @@ function todayISODate() {
   return new Date().toISOString().slice(0, 10);
 }
 
-// Avoid `any`
-type WorkforceRow = Record<string, unknown>;
-
-function mapWorkforceRow(row: WorkforceRow): WorkforceWorker {
-  const fullName =
-    (typeof row.full_name === "string" ? row.full_name : null) ??
-    (typeof row.fullName === "string" ? row.fullName : null) ??
-    (typeof row.name === "string" ? row.name : null) ??
-    (typeof row.worker_name === "string" ? row.worker_name : null) ??
-    "Unknown";
-
-  const building =
-    (typeof row.building === "string" ? row.building : null) ??
-    (typeof row.dc === "string" ? row.dc : null) ??
-    (typeof row.location === "string" ? row.location : null) ??
-    null;
-
-  const shift =
-    (typeof row.shift === "string" ? row.shift : null) ??
-    (typeof row.shift_name === "string" ? row.shift_name : null) ??
-    (typeof row.shiftName === "string" ? row.shiftName : null) ??
-    null;
-
-  const activeRaw =
-    (typeof row.active === "boolean" ? row.active : null) ??
-    (typeof row.is_active === "boolean" ? row.is_active : null) ??
-    null;
-
-  const statusRaw =
-    (typeof row.status === "string" ? row.status : null) ??
-    (typeof row.employment_status === "string" ? row.employment_status : null) ??
-    null;
-
-  const active =
-    typeof activeRaw === "boolean"
-      ? activeRaw
-      : statusRaw
-      ? String(statusRaw).toLowerCase().includes("active")
-      : true;
-
-  const idValue =
-    (typeof row.id === "string" ? row.id : null) ??
-    (typeof row.id === "number" ? String(row.id) : null) ??
-    (typeof row.worker_id === "string" ? row.worker_id : null) ??
-    (typeof row.worker_id === "number" ? String(row.worker_id) : null) ??
-    crypto.randomUUID();
-
-  return {
-    id: String(idValue),
-    fullName: String(fullName).trim(),
-    building,
-    shift,
-    active,
-  };
-}
-
 function blankWorker(): WorkerContribution {
   return { name: "", minutesWorked: 0, percentContribution: 0, payout: 0 };
 }
@@ -144,7 +82,6 @@ function approxEqual(a: number, b: number, tolerance = 0.01): boolean {
   return Math.abs(a - b) <= tolerance;
 }
 
-/** ---- Supabase error helpers (no `any`) ---- */
 function extractSupabaseError(err: unknown): Record<string, unknown> {
   const extracted: Record<string, unknown> = {
     type: typeof err,
@@ -153,18 +90,14 @@ function extractSupabaseError(err: unknown): Record<string, unknown> {
 
   if (typeof err === "object" && err !== null) {
     const rec = err as Record<string, unknown>;
-
     if (typeof rec.message === "string") extracted.message = rec.message;
     if (typeof rec.details === "string") extracted.details = rec.details;
     if (typeof rec.hint === "string") extracted.hint = rec.hint;
     if (typeof rec.code === "string") extracted.code = rec.code;
     if (typeof rec.status === "number") extracted.status = rec.status;
 
-    for (const k of Object.getOwnPropertyNames(err)) {
-      extracted[k] = rec[k];
-    }
+    for (const k of Object.getOwnPropertyNames(err)) extracted[k] = rec[k];
   }
-
   return extracted;
 }
 
@@ -172,6 +105,16 @@ function logSupabase(label: string, err: unknown, level: "error" | "warn" = "err
   const extracted = extractSupabaseError(err);
   const logger = level === "warn" ? console.warn : console.error;
   logger(label, extracted);
+}
+
+function formatSupabaseError(err: unknown): string {
+  const e = extractSupabaseError(err);
+  const msg =
+    (typeof e.message === "string" && e.message) ||
+    (typeof e.details === "string" && e.details) ||
+    (typeof e.hint === "string" && e.hint) ||
+    "";
+  return msg || "Unknown error (check console).";
 }
 
 function isMissingOwnershipColumnError(err: unknown): boolean {
@@ -187,23 +130,24 @@ export default function ContainersPage() {
   const currentUser = useCurrentUser();
   const router = useRouter();
 
-  const isLead = currentUser?.accessRole === "Lead";
-  const leadBuilding = currentUser?.building || "";
+  const role = currentUser?.accessRole;
+  const isLead = role === "Lead";
+  const isBuildingManager = role === "Building Manager";
 
   /**
-   * ✅ NEW: hard-hide this page from Leads so they don't enter containers here.
-   * They will be redirected to Work Orders, and we show a short message while redirecting.
+   * ✅ Hide Containers page from Leads AND Building Managers.
    */
   useEffect(() => {
     if (!currentUser) return;
-    if (isLead) router.replace("/work-orders");
-  }, [currentUser, isLead, router]);
+    if (isLead || isBuildingManager) router.replace("/work-orders");
+  }, [currentUser, isLead, isBuildingManager, router]);
 
   function isOwner(row: ContainerRow): boolean {
     if (!currentUser) return false;
     const byId = !!row.created_by_user_id && row.created_by_user_id === currentUser.id;
     const byEmail =
-      !!row.created_by_email && row.created_by_email.toLowerCase() === currentUser.email.toLowerCase();
+      !!row.created_by_email &&
+      row.created_by_email.toLowerCase() === currentUser.email.toLowerCase();
     return byId || byEmail;
   }
 
@@ -212,25 +156,13 @@ export default function ContainersPage() {
     return isOwner(row);
   }
 
-  const [buildingFilter, setBuildingFilter] = useState<string>(() =>
-    isLead && leadBuilding ? leadBuilding : "ALL"
-  );
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const [containers, setContainers] = useState<ContainerRow[]>([]);
-  const [workOrders, setWorkOrders] = useState<WorkOrderOption[]>([]);
-
-  const [expandedWorkOrderId, setExpandedWorkOrderId] = useState<string | null>(null);
-  const [showUnassigned, setShowUnassigned] = useState<boolean>(true);
-
-  const [workforce, setWorkforce] = useState<WorkforceWorker[]>([]);
-  const [workforceLoading, setWorkforceLoading] = useState<boolean>(false);
-
   const [showForm, setShowForm] = useState(false);
 
-  // Ownership columns support (containers table)
   const [ownershipColsSupported, setOwnershipColsSupported] = useState<boolean | null>(null);
 
   const [formState, setFormState] = useState<EditFormState>(() => ({
@@ -241,14 +173,9 @@ export default function ContainersPage() {
     piecesTotal: 0,
     skusTotal: 0,
     workOrderId: null,
-    workers: [blankWorker()], // start with ONE worker row
+    palletized: false, // ✅ NEW
+    workers: [blankWorker()],
   }));
-
-  useEffect(() => {
-    if (isLead && leadBuilding && buildingFilter !== leadBuilding) {
-      setBuildingFilter(leadBuilding);
-    }
-  }, [isLead, leadBuilding, buildingFilter]);
 
   // Probe ownership columns for containers
   useEffect(() => {
@@ -267,7 +194,6 @@ export default function ContainersPage() {
 
         if (error) {
           setOwnershipColsSupported(false);
-          // not fatal; just means we won't insert those fields
           logSupabase("Containers ownership probe failed (treated as unsupported)", error, "warn");
         } else {
           setOwnershipColsSupported(true);
@@ -284,6 +210,29 @@ export default function ContainersPage() {
     };
   }, [currentUser]);
 
+  const persistContainersLocal = useCallback((rows: ContainerRow[]) => {
+    try {
+      const mappedForLocal = rows.map((row) => ({
+        id: row.id,
+        building: row.building,
+        shift: row.shift ?? "",
+        date: row.work_date ?? row.created_at,
+        createdAt: row.created_at,
+        containerNo: row.container_no,
+        piecesTotal: row.pieces_total,
+        skusTotal: row.skus_total,
+        containerPayTotal: row.pay_total,
+        workOrderId: row.work_order_id,
+        workers: row.workers || [],
+        palletized: !!row.palletized, // ✅ NEW
+      }));
+      if (typeof window !== "undefined")
+        window.localStorage.setItem(CONTAINERS_KEY, JSON.stringify(mappedForLocal));
+    } catch (e) {
+      logSupabase("Failed to write containers to localStorage", e, "warn");
+    }
+  }, []);
+
   const loadContainers = useCallback(async () => {
     if (!currentUser) return;
 
@@ -293,9 +242,9 @@ export default function ContainersPage() {
     try {
       let query = supabase.from("containers").select("*").order("created_at", { ascending: false });
 
-      if (isLead && leadBuilding) {
-        query = query.eq("building", leadBuilding);
-      }
+      // Even though Leads/Managers are redirected, keep it safe:
+      if ((isLead || isBuildingManager) && currentUser.building)
+        query = query.eq("building", currentUser.building);
 
       const { data, error } = await query;
 
@@ -312,6 +261,7 @@ export default function ContainersPage() {
           work_order_id: row.work_order_id ?? null,
           shift: (row.shift ?? null) as string | null,
           work_date: (row.work_date ?? null) as string | null,
+          palletized: (row as unknown as { palletized?: boolean | null }).palletized ?? null, // ✅ NEW
           created_by_user_id:
             (row as unknown as { created_by_user_id?: string | null }).created_by_user_id ?? null,
           created_by_email:
@@ -319,125 +269,18 @@ export default function ContainersPage() {
         })) ?? [];
 
       setContainers(rows);
-
-      try {
-        const mappedForLocal = rows.map((row) => ({
-          id: row.id,
-          building: row.building,
-          shift: row.shift ?? "",
-          date: row.work_date ?? row.created_at,
-          createdAt: row.created_at,
-          containerNo: row.container_no,
-          piecesTotal: row.pieces_total,
-          skusTotal: row.skus_total,
-          containerPayTotal: row.pay_total,
-          workOrderId: row.work_order_id,
-          workers: row.workers || [],
-        }));
-        if (typeof window !== "undefined") {
-          window.localStorage.setItem(CONTAINERS_KEY, JSON.stringify(mappedForLocal));
-        }
-      } catch (e) {
-        logSupabase("Failed to write containers to localStorage", e, "warn");
-      }
+      persistContainersLocal(rows);
     } catch (e) {
       logSupabase("Unexpected error loading containers", e, "error");
       setError("Unexpected error loading containers.");
     } finally {
       setLoading(false);
     }
-  }, [currentUser, isLead, leadBuilding]);
+  }, [currentUser, isLead, isBuildingManager, persistContainersLocal]);
 
   useEffect(() => {
     loadContainers();
   }, [loadContainers]);
-
-  useEffect(() => {
-    if (!currentUser) return;
-
-    async function loadWorkOrders() {
-      try {
-        const { data, error } = await supabase
-          .from("work_orders")
-          .select("id, building, status, work_order_code, created_at")
-          .order("created_at", { ascending: false });
-
-        if (error) {
-          logSupabase("Error loading work orders", error, "warn");
-          return;
-        }
-
-        const opts: WorkOrderOption[] =
-          (data || []).map((row: Record<string, unknown>) => ({
-            id: String(row.id),
-            name:
-              (typeof row.work_order_code === "string" ? row.work_order_code : null) ??
-              `Work Order ${String(row.id).slice(-4)}`,
-            building: (typeof row.building === "string" ? row.building : null) ?? (BUILDINGS[0] || "DC1"),
-            status: (typeof row.status === "string" ? row.status : null) ?? "Pending",
-          })) ?? [];
-
-        setWorkOrders(opts);
-      } catch (e) {
-        logSupabase("Unexpected error loading work orders", e, "warn");
-      }
-    }
-
-    loadWorkOrders();
-  }, [currentUser]);
-
-  useEffect(() => {
-    if (!currentUser) return;
-
-    async function loadWorkforce() {
-      setWorkforceLoading(true);
-      try {
-        const { data, error } = await supabase.from("workforce").select("*").order("created_at", { ascending: false });
-
-        if (error) {
-          logSupabase("Error loading workforce", error, "warn");
-          return;
-        }
-
-        const mapped: WorkforceWorker[] = ((data as unknown[] | null | undefined) ?? [])
-          .map((r) => mapWorkforceRow(r as WorkforceRow))
-          .filter((w) => w.fullName && w.fullName !== "Unknown");
-
-        setWorkforce(mapped);
-      } catch (e) {
-        logSupabase("Unexpected error loading workforce", e, "warn");
-      } finally {
-        setWorkforceLoading(false);
-      }
-    }
-
-    loadWorkforce();
-  }, [currentUser]);
-
-  const filteredContainers = useMemo(() => {
-    let rows = [...containers];
-
-    if (isLead && leadBuilding) {
-      rows = rows.filter((c) => c.building === leadBuilding);
-      return rows;
-    }
-
-    if (buildingFilter !== "ALL") {
-      rows = rows.filter((c) => c.building === buildingFilter);
-    }
-
-    return rows;
-  }, [containers, buildingFilter, isLead, leadBuilding]);
-
-  const totalPieces = useMemo(
-    () => filteredContainers.reduce((sum, c) => sum + (c.pieces_total || 0), 0),
-    [filteredContainers]
-  );
-
-  const totalPay = useMemo(
-    () => filteredContainers.reduce((sum, c) => sum + (Number(c.pay_total) || 0), 0),
-    [filteredContainers]
-  );
 
   function resetForm() {
     setFormState({
@@ -448,23 +291,17 @@ export default function ContainersPage() {
       piecesTotal: 0,
       skusTotal: 0,
       workOrderId: null,
+      palletized: false, // ✅ NEW
       workers: [blankWorker()],
     });
   }
 
-  function openNewForm() {
+  function openNew() {
     resetForm();
     setShowForm(true);
   }
 
-  function openEditForm(row: ContainerRow) {
-    if (isLead && !canLeadEdit(row)) {
-      setError("Leads can only edit their own container entries.");
-      return;
-    }
-
-    const existingWorkers = (row.workers || []).length > 0 ? row.workers || [] : [blankWorker()];
-
+  function openEdit(row: ContainerRow) {
     setFormState({
       id: row.id,
       building: row.building,
@@ -474,14 +311,9 @@ export default function ContainersPage() {
       piecesTotal: row.pieces_total,
       skusTotal: row.skus_total,
       workOrderId: row.work_order_id ?? null,
-      workers: existingWorkers.map((w) => ({
-        name: w.name ?? "",
-        minutesWorked: Number(w.minutesWorked ?? 0),
-        percentContribution: Number(w.percentContribution ?? 0),
-        payout: Number(w.payout ?? 0),
-      })),
+      palletized: !!row.palletized, // ✅ NEW
+      workers: (row.workers || []).length ? (row.workers || []) : [blankWorker()],
     });
-
     setShowForm(true);
   }
 
@@ -512,7 +344,7 @@ export default function ContainersPage() {
 
   const { payForForm, workersWithPayout, percentSum } = useMemo(() => {
     const pieces = formState.piecesTotal || 0;
-    const pay = calculateContainerPay(pieces);
+    const pay = calculateContainerPay(pieces, formState.palletized);
 
     const workers = (formState.workers || []).map((w) => {
       const pct = Number(w.percentContribution || 0);
@@ -520,9 +352,8 @@ export default function ContainersPage() {
     });
 
     const sumPct = workers.reduce((sum, w) => sum + (Number(w.percentContribution) || 0), 0);
-
     return { payForForm: pay, workersWithPayout: workers, percentSum: sumPct };
-  }, [formState.piecesTotal, formState.workers]);
+  }, [formState.piecesTotal, formState.workers, formState.palletized]);
 
   const isPercentValid = approxEqual(percentSum, 100, 0.02) || approxEqual(percentSum, 0, 0.0001);
 
@@ -533,9 +364,13 @@ export default function ContainersPage() {
     setError(null);
 
     if (!formState.containerNo.trim()) return setError("Container number is required.");
+
+    // ✅ Still force pieces even if palletized
     if (formState.piecesTotal <= 0) return setError("Pieces total must be greater than 0.");
 
-    const finalWorkers = workersWithPayout.filter((w) => w.name.trim() && Number(w.percentContribution) > 0);
+    const finalWorkers = workersWithPayout.filter(
+      (w) => w.name.trim() && Number(w.percentContribution) > 0
+    );
 
     if (finalWorkers.length > 0 && !approxEqual(percentSum, 100, 0.02)) {
       setError("Worker contribution percentages must total 100% (decimals allowed).");
@@ -545,10 +380,8 @@ export default function ContainersPage() {
     setSaving(true);
 
     try {
-      const effectiveBuilding = isLead && leadBuilding ? leadBuilding : formState.building;
-
       const basePayload: Record<string, unknown> = {
-        building: effectiveBuilding,
+        building: formState.building,
         shift: formState.shift,
         work_date: formState.workDate,
         container_no: formState.containerNo.trim(),
@@ -559,26 +392,23 @@ export default function ContainersPage() {
         rework_pieces: 0,
         workers: finalWorkers,
         work_order_id: formState.workOrderId || null,
+        palletized: formState.palletized, // ✅ NEW
       };
 
       if (formState.id) {
-        if (isLead) {
-          const existing = containers.find((c) => c.id === formState.id);
-          if (!existing || !canLeadEdit(existing)) {
-            setError("Leads can only edit their own container entries.");
-            return;
-          }
+        const existing = containers.find((c) => c.id === formState.id);
+        if (!existing || !canLeadEdit(existing)) {
+          setError("Not allowed.");
+          return;
         }
 
         const { error } = await supabase.from("containers").update(basePayload).eq("id", formState.id);
-
         if (error) {
           logSupabase("Error updating container", error, "error");
-          setError("Failed to update container.");
+          setError(formatSupabaseError(error) || "Failed to update container.");
           return;
         }
       } else {
-        // Try with ownership columns if supported. If missing cols, retry without.
         let createPayload: Record<string, unknown> = { ...basePayload };
 
         if (ownershipColsSupported) {
@@ -592,14 +422,14 @@ export default function ContainersPage() {
         let res = await supabase.from("containers").insert(createPayload).select("id").single();
 
         if (res.error && ownershipColsSupported && isMissingOwnershipColumnError(res.error)) {
-          logSupabase("Insert failed (ownership cols missing) — retrying without ownership", res.error, "warn");
+          logSupabase("Insert failed (ownership cols missing) — retrying", res.error, "warn");
           setOwnershipColsSupported(false);
           res = await supabase.from("containers").insert(basePayload).select("id").single();
         }
 
         if (res.error) {
           logSupabase("Error creating container", res.error, "error");
-          setError("Failed to create container.");
+          setError(formatSupabaseError(res.error) || "Failed to create container.");
           return;
         }
       }
@@ -617,15 +447,16 @@ export default function ContainersPage() {
 
   async function handleDelete(id: string) {
     const row = containers.find((c) => c.id === id);
-
-    if (isLead) {
-      if (!row || !canLeadEdit(row)) {
-        setError("Leads can only delete their own container entries.");
-        return;
-      }
+    if (!row || !canLeadEdit(row)) {
+      setError("Not allowed.");
+      return;
     }
 
-    if (!confirm("Delete this container? This cannot be undone.")) return;
+    if (typeof window !== "undefined") {
+      const ok = window.confirm("Delete this container? This cannot be undone.");
+      if (!ok) return;
+    }
+
     setSaving(true);
     setError(null);
 
@@ -633,166 +464,16 @@ export default function ContainersPage() {
       const { error } = await supabase.from("containers").delete().eq("id", id);
       if (error) {
         logSupabase("Failed to delete container", error, "error");
-        setError("Failed to delete container.");
+        setError(formatSupabaseError(error) || "Failed to delete container.");
         return;
       }
-
-      const updated = containers.filter((c) => c.id !== id);
-      setContainers(updated);
-
-      try {
-        const mappedForLocal = updated.map((row) => ({
-          id: row.id,
-          building: row.building,
-          shift: row.shift ?? "",
-          date: row.work_date ?? row.created_at,
-          createdAt: row.created_at,
-          containerNo: row.container_no,
-          piecesTotal: row.pieces_total,
-          skusTotal: row.skus_total,
-          containerPayTotal: row.pay_total,
-          workOrderId: row.work_order_id,
-          workers: row.workers || [],
-        }));
-        if (typeof window !== "undefined") {
-          window.localStorage.setItem(CONTAINERS_KEY, JSON.stringify(mappedForLocal));
-        }
-      } catch (e) {
-        logSupabase("Failed to write containers to localStorage", e, "warn");
-      }
+      await loadContainers();
     } catch (e) {
       logSupabase("Unexpected error deleting container", e, "error");
       setError("Unexpected error deleting container.");
     } finally {
       setSaving(false);
     }
-  }
-
-  const workOrdersForBuilding = useMemo(
-    () => workOrders.filter((wo) => wo.building === formState.building),
-    [workOrders, formState.building]
-  );
-
-  const visibleWorkOrders = useMemo(() => {
-    let list = [...workOrders];
-
-    if (isLead && leadBuilding) {
-      return list.filter((wo) => wo.building === leadBuilding);
-    }
-
-    if (buildingFilter !== "ALL") {
-      list = list.filter((wo) => wo.building === buildingFilter);
-    }
-
-    return list;
-  }, [workOrders, isLead, leadBuilding, buildingFilter]);
-
-  const containersByWorkOrder = useMemo(() => {
-    const map = new Map<string, ContainerRow[]>();
-    for (const c of filteredContainers) {
-      const key = c.work_order_id ? String(c.work_order_id) : "__unassigned__";
-      if (!map.has(key)) map.set(key, []);
-      map.get(key)!.push(c);
-    }
-    for (const [k, arr] of map.entries()) {
-      arr.sort((a, b) => b.created_at.localeCompare(a.created_at));
-      map.set(k, arr);
-    }
-    return map;
-  }, [filteredContainers]);
-
-  const workforceOptionsForForm = useMemo(() => {
-    const b = (isLead && leadBuilding ? leadBuilding : formState.building) || "";
-    const s = formState.shift || "";
-
-    const list = workforce
-      .filter((w) => w.active !== false)
-      .filter((w) => {
-        if (w.building && b && w.building !== b) return false;
-        return true;
-      })
-      .filter((w) => {
-        if (w.shift && s && String(w.shift) !== String(s)) return false;
-        return true;
-      })
-      .map((w) => w.fullName)
-      .filter(Boolean);
-
-    return Array.from(new Set(list)).sort((a, b) => a.localeCompare(b));
-  }, [workforce, formState.building, formState.shift, isLead, leadBuilding]);
-
-  function renderContainerTable(rows: ContainerRow[]) {
-    return (
-      <div className="overflow-x-auto text-xs">
-        <table className="min-w-full border-collapse">
-          <thead>
-            <tr className="border-b border-slate-800 text-[11px] text-slate-400">
-              <th className="text-left py-2 pr-3">Date</th>
-              <th className="text-left py-2 pr-3">Building</th>
-              <th className="text-left py-2 pr-3">Shift</th>
-              <th className="text-left py-2 pr-3">Container #</th>
-              <th className="text-right py-2 pr-3">Pieces</th>
-              <th className="text-right py-2 pr-3">SKUs</th>
-              <th className="text-right py-2 pr-3">Pay Total</th>
-              <th className="text-left py-2 pr-3">Workers</th>
-              <th className="text-right py-2 pl-3">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((c) => {
-              const leadBlocked = isLead && !canLeadEdit(c);
-
-              return (
-                <tr key={c.id} className="border-b border-slate-800/60 hover:bg-slate-900/70">
-                  <td className="py-2 pr-3 text-[11px] text-slate-400">
-                    {c.work_date ? String(c.work_date).slice(0, 10) : new Date(c.created_at).toISOString().slice(0, 10)}
-                  </td>
-                  <td className="py-2 pr-3 text-[11px] text-slate-200">{c.building}</td>
-                  <td className="py-2 pr-3 text-[11px] text-slate-200">{c.shift ?? "—"}</td>
-                  <td className="py-2 pr-3 text-[11px] text-slate-200">{c.container_no}</td>
-                  <td className="py-2 pr-3 text-right text-[11px] text-slate-200">{c.pieces_total}</td>
-                  <td className="py-2 pr-3 text-right text-[11px] text-slate-200">{c.skus_total}</td>
-                  <td className="py-2 pr-3 text-right text-[11px] text-emerald-300">
-                    ${Number(c.pay_total).toFixed(2)}
-                  </td>
-                  <td className="py-2 pr-3 text-[11px] text-slate-300">
-                    {(c.workers || [])
-                      .filter((w) => w.name)
-                      .map(
-                        (w) =>
-                          `${w.name} (${Number(w.percentContribution).toFixed(2)}% · $${Number(w.payout).toFixed(2)})`
-                      )
-                      .join(", ") || "—"}
-                  </td>
-                  <td className="py-2 pl-3 text-right">
-                    <div className="inline-flex gap-2">
-                      <button
-                        className="px-3 py-1 rounded-lg bg-slate-800 text-[11px] text-slate-100 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed"
-                        onClick={() => openEditForm(c)}
-                        disabled={leadBlocked}
-                        title={leadBlocked ? "Leads can only edit their own entries." : "Edit"}
-                        type="button"
-                      >
-                        Edit
-                      </button>
-                      <button
-                        className="px-3 py-1 rounded-lg bg-rose-700 text-[11px] text-white hover:bg-rose-600 disabled:opacity-50 disabled:cursor-not-allowed"
-                        onClick={() => handleDelete(c.id)}
-                        disabled={saving || leadBlocked}
-                        title={leadBlocked ? "Leads can only delete their own entries." : "Delete"}
-                        type="button"
-                      >
-                        Delete
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-    );
   }
 
   if (!currentUser) {
@@ -807,16 +488,16 @@ export default function ContainersPage() {
   }
 
   /**
-   * ✅ NEW: lead-facing UI (in case they land here briefly, or JS redirect is blocked)
+   * ✅ Block UI if they land here briefly (JS redirect might be blocked)
    */
-  if (isLead) {
+  if (isLead || isBuildingManager) {
     return (
       <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center px-6">
         <div className="max-w-lg w-full rounded-2xl border border-slate-800 bg-slate-900/60 p-6 space-y-3">
-          <div className="text-lg font-semibold">Containers entry moved</div>
+          <div className="text-lg font-semibold">Containers page is disabled</div>
           <div className="text-sm text-slate-300">
-            To keep things simple, container entry is now done inside <span className="text-slate-100 font-semibold">Work Orders</span>.
-            This Containers page is hidden for Leads.
+            Container entry and edits are handled inside{" "}
+            <span className="text-slate-100 font-semibold">Work Orders</span>.
           </div>
 
           <div className="pt-2 flex gap-2">
@@ -844,67 +525,34 @@ export default function ContainersPage() {
     );
   }
 
+  // Admin / allowed roles view
+  const totalPay = containers.reduce((sum, c) => sum + (Number(c.pay_total) || 0), 0);
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-950 to-slate-900 text-slate-50">
-      <div className="mx-auto max-w-6xl px-4 py-6 space-y-6">
-        <div className="flex items-center justify-between gap-3">
+      <div className="mx-auto max-w-6xl p-6 space-y-6">
+        <div className="flex items-center justify-between gap-4">
           <div>
             <h1 className="text-2xl font-semibold text-slate-50">Containers</h1>
             <p className="text-sm text-slate-400">
-              Live container tracking with automatic pay scale, work orders, and worker contributions.
+              Admin view — add/edit containers. Palletized pays a flat $100.
             </p>
           </div>
           <div className="flex items-center gap-2">
             <button
-              onClick={() => router.push("/")}
-              className="rounded-lg border border-slate-700 px-3 py-1.5 text-[11px] text-slate-200 hover:bg-slate-800"
               type="button"
-            >
-              ← Back to Dashboard
-            </button>
-            <button
-              onClick={openNewForm}
-              className="rounded-lg bg-sky-600 hover:bg-sky-500 text-[11px] font-medium text-white px-4 py-2"
-              type="button"
+              onClick={openNew}
+              className="rounded-lg bg-sky-600 hover:bg-sky-500 text-[12px] font-medium text-white px-4 py-2"
             >
               + New Container
             </button>
-          </div>
-        </div>
-
-        <div className="flex flex-wrap items-center justify-between gap-3 text-xs">
-          <div className="flex items-center gap-2">
-            <span className="text-slate-500">Building:</span>
-            <select
-              className="rounded-lg bg-slate-900 border border-slate-700 px-3 py-1.5 text-xs text-slate-50"
-              value={buildingFilter}
-              onChange={(e) => setBuildingFilter(e.target.value)}
+            <button
+              type="button"
+              onClick={() => router.replace("/")}
+              className="rounded-lg border border-slate-700 px-4 py-2 text-[12px] text-slate-200 hover:bg-slate-800"
             >
-              <option value="ALL">All Buildings</option>
-              {BUILDINGS.map((b) => (
-                <option key={b} value={b}>
-                  {b}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div className="flex flex-wrap gap-4">
-            <div className="text-slate-400">
-              Containers: <span className="text-slate-100">{filteredContainers.length}</span>
-            </div>
-            <div className="text-slate-400">
-              Total Pieces: <span className="text-slate-100">{totalPieces}</span>
-            </div>
-            <div className="text-slate-400">
-              Total Pay: <span className="text-emerald-300">${totalPay.toFixed(2)}</span>
-            </div>
-            <div className="text-slate-500 text-[11px]">
-              Ownership cols:{" "}
-              <span className="text-slate-300">
-                {ownershipColsSupported === null ? "checking…" : ownershipColsSupported ? "yes" : "no"}
-              </span>
-            </div>
+              Back
+            </button>
           </div>
         </div>
 
@@ -914,75 +562,79 @@ export default function ContainersPage() {
           </div>
         )}
 
-        <div className="rounded-2xl bg-slate-900/90 border border-slate-800 p-4 shadow-sm shadow-slate-900/60">
-          <div className="flex items-center justify-between mb-3">
-            <h2 className="text-sm font-semibold text-slate-100">Containers by Work Order</h2>
-            {loading && <div className="text-[11px] text-slate-400">Loading…</div>}
+        <div className="rounded-2xl bg-slate-900 border border-slate-800 p-4 text-xs">
+          <div className="text-slate-300">
+            Total containers:{" "}
+            <span className="font-semibold text-slate-50">{containers.length}</span> · Total pay:{" "}
+            <span className="font-semibold text-emerald-300">${totalPay.toFixed(2)}</span>
           </div>
-
-          {(() => {
-            const unassigned = containersByWorkOrder.get("__unassigned__") || [];
-            if (unassigned.length === 0) return null;
-
-            return (
-              <div className="mb-3 rounded-xl border border-slate-800 bg-slate-950">
-                <button
-                  type="button"
-                  onClick={() => setShowUnassigned((p) => !p)}
-                  className="w-full flex items-center justify-between px-3 py-2 text-left"
-                >
-                  <div>
-                    <div className="text-slate-100 text-sm font-semibold">Unassigned Containers</div>
-                    <div className="text-[11px] text-slate-500">Containers not linked to a work order.</div>
-                  </div>
-                  <div className="text-[10px] text-slate-500">{showUnassigned ? "▴" : "▾"}</div>
-                </button>
-                {showUnassigned && <div className="px-3 pb-3">{renderContainerTable(unassigned)}</div>}
-              </div>
-            );
-          })()}
-
-          <div className="space-y-3">
-            {visibleWorkOrders.map((wo) => {
-              const rows = containersByWorkOrder.get(wo.id) || [];
-              if (rows.length === 0) return null;
-
-              const isOpen = expandedWorkOrderId === wo.id;
-              const piecesSum = rows.reduce((sum, c) => sum + (c.pieces_total || 0), 0);
-              const paySum = rows.reduce((sum, c) => sum + (Number(c.pay_total) || 0), 0);
-
-              return (
-                <div key={wo.id} className="rounded-xl border border-slate-800 bg-slate-950">
-                  <button
-                    type="button"
-                    onClick={() => setExpandedWorkOrderId((p) => (p === wo.id ? null : wo.id))}
-                    className="w-full flex items-center justify-between px-3 py-2 text-left"
-                  >
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <div className="text-slate-100 text-sm font-semibold">{wo.name}</div>
-                        <span className="inline-flex rounded-full px-2 py-0.5 text-[10px] border bg-slate-900/80 text-slate-200 border-slate-600/70">
-                          {wo.status}
-                        </span>
-                      </div>
-                      <div className="text-[11px] text-slate-500">
-                        {wo.building} • {rows.length} containers • Pieces {piecesSum} • Pay ${paySum.toFixed(2)}
-                      </div>
-                    </div>
-                    <div className="text-[10px] text-slate-500">{isOpen ? "▴" : "▾"}</div>
-                  </button>
-
-                  {isOpen && <div className="px-3 pb-3">{renderContainerTable(rows)}</div>}
-                </div>
-              );
-            })}
-          </div>
-
-          {filteredContainers.length === 0 && !loading && (
-            <div className="py-3 text-center text-[11px] text-slate-500">No containers found for this filter.</div>
-          )}
+          {loading && <div className="mt-2 text-[11px] text-slate-500">Loading…</div>}
         </div>
 
+        <div className="overflow-x-auto rounded-2xl bg-slate-900 border border-slate-800 p-4 text-xs">
+          <table className="min-w-full border-collapse">
+            <thead>
+              <tr className="border-b border-slate-800 text-[11px] text-slate-400">
+                <th className="text-left py-2 pr-3">Date</th>
+                <th className="text-left py-2 pr-3">Building</th>
+                <th className="text-left py-2 pr-3">Shift</th>
+                <th className="text-left py-2 pr-3">Container #</th>
+                <th className="text-right py-2 pr-3">Pieces</th>
+                <th className="text-right py-2 pr-3">SKUs</th>
+                <th className="text-left py-2 pr-3">Type</th>
+                <th className="text-right py-2 pr-3">Pay Total</th>
+                <th className="text-right py-2 pl-3">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {containers.map((c) => (
+                <tr key={c.id} className="border-b border-slate-800/60 hover:bg-slate-900/70">
+                  <td className="py-2 pr-3 text-[11px] text-slate-400">
+                    {c.work_date ? String(c.work_date).slice(0, 10) : String(c.created_at).slice(0, 10)}
+                  </td>
+                  <td className="py-2 pr-3 text-[11px] text-slate-200">{c.building}</td>
+                  <td className="py-2 pr-3 text-[11px] text-slate-200">{c.shift ?? "—"}</td>
+                  <td className="py-2 pr-3 text-[11px] text-slate-200">{c.container_no}</td>
+                  <td className="py-2 pr-3 text-right text-[11px] text-slate-200">{c.pieces_total}</td>
+                  <td className="py-2 pr-3 text-right text-[11px] text-slate-200">{c.skus_total}</td>
+                  <td className="py-2 pr-3 text-[11px] text-slate-200">{c.palletized ? "Palletized" : "Loose"}</td>
+                  <td className="py-2 pr-3 text-right text-[11px] text-emerald-300">
+                    ${Number(c.pay_total).toFixed(2)}
+                  </td>
+                  <td className="py-2 pl-3 text-right">
+                    <div className="inline-flex gap-2">
+                      <button
+                        className="px-3 py-1 rounded-lg bg-slate-800 text-[11px] text-slate-100 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                        onClick={() => openEdit(c)}
+                        disabled={saving}
+                        type="button"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        className="px-3 py-1 rounded-lg bg-rose-700 text-[11px] text-white hover:bg-rose-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                        onClick={() => handleDelete(c.id)}
+                        disabled={saving}
+                        type="button"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+              {containers.length === 0 && !loading && (
+                <tr>
+                  <td className="py-6 text-center text-[11px] text-slate-500" colSpan={9}>
+                    No containers yet.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Modal */}
         {showForm && (
           <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
             <div className="w-full max-w-2xl rounded-2xl bg-slate-950 border border-slate-800 shadow-xl p-6 text-xs">
@@ -1009,13 +661,7 @@ export default function ContainersPage() {
                     <select
                       className="w-full rounded-lg bg-slate-950 border border-slate-700 px-2 py-1.5 text-[11px] text-slate-50"
                       value={formState.building}
-                      onChange={(e) =>
-                        setFormState((prev) => ({
-                          ...prev,
-                          building: e.target.value,
-                          workOrderId: null,
-                        }))
-                      }
+                      onChange={(e) => setFormState((prev) => ({ ...prev, building: e.target.value }))}
                     >
                       {BUILDINGS.map((b) => (
                         <option key={b} value={b}>
@@ -1059,6 +705,24 @@ export default function ContainersPage() {
                       placeholder="e.g., MSKU1234567"
                     />
                   </div>
+
+                  {/* ✅ NEW: Palletized checkbox */}
+                  <div className="md:col-span-4 flex items-center gap-2 pt-1">
+                    <input
+                      id="palletized"
+                      type="checkbox"
+                      className="h-4 w-4"
+                      checked={formState.palletized}
+                      onChange={(e) => setFormState((prev) => ({ ...prev, palletized: e.target.checked }))}
+                    />
+                    <label htmlFor="palletized" className="text-[11px] text-slate-200">
+                      Palletized (flat $100 — overrides payscale)
+                    </label>
+                    <div className="ml-auto text-[11px] text-slate-400">
+                      Pay Total:{" "}
+                      <span className="text-emerald-300 font-semibold">${payForForm.toFixed(2)}</span>
+                    </div>
+                  </div>
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -1068,147 +732,98 @@ export default function ContainersPage() {
                       type="number"
                       className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
                       value={formState.piecesTotal}
-                      onChange={(e) => setFormState((prev) => ({ ...prev, piecesTotal: Number(e.target.value) || 0 }))}
-                      min={0}
+                      onChange={(e) =>
+                        setFormState((prev) => ({ ...prev, piecesTotal: Number(e.target.value) || 0 }))
+                      }
                     />
+                    {formState.palletized && (
+                      <div className="mt-1 text-[10px] text-slate-500">
+                        Pieces are still required for tracking, but pay is forced to $100 when palletized.
+                      </div>
+                    )}
                   </div>
 
                   <div>
-                    <label className="block text-[11px] text-slate-400 mb-1">SKU Count</label>
+                    <label className="block text-[11px] text-slate-400 mb-1">SKUs Total</label>
                     <input
                       type="number"
                       className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
                       value={formState.skusTotal}
-                      onChange={(e) => setFormState((prev) => ({ ...prev, skusTotal: Number(e.target.value) || 0 }))}
-                      min={0}
+                      onChange={(e) =>
+                        setFormState((prev) => ({ ...prev, skusTotal: Number(e.target.value) || 0 }))
+                      }
                     />
                   </div>
                 </div>
 
-                <div>
-                  <label className="block text-[11px] text-slate-400 mb-1">Work Order (optional)</label>
-                  <select
-                    className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
-                    value={formState.workOrderId || ""}
-                    onChange={(e) => setFormState((prev) => ({ ...prev, workOrderId: e.target.value || null }))}
-                  >
-                    <option value="">Unassigned</option>
-                    {workOrdersForBuilding.map((wo) => (
-                      <option key={wo.id} value={wo.id}>
-                        {wo.name} ({wo.status})
-                      </option>
-                    ))}
-                  </select>
-                  <p className="mt-1 text-[10px] text-slate-500">Only work orders for this building are shown.</p>
-                </div>
-
-                {/* Worker Contributions */}
-                <div className="rounded-xl bg-slate-900 border border-slate-800 p-3 space-y-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="text-[11px] text-slate-300 font-semibold">Worker Contributions</div>
-
-                    <div className="flex items-center gap-3 text-[11px] text-slate-400">
-                      <div>
-                        Total %:{" "}
-                        <span className={isPercentValid ? "text-emerald-300" : "text-rose-300"}>
-                          {percentSum.toFixed(2)}%
-                        </span>
-                      </div>
-                      <div>
-                        Container Pay: <span className="text-emerald-300">${payForForm.toFixed(2)}</span>
-                      </div>
-                    </div>
-                  </div>
-
+                {/* Workers */}
+                <div className="rounded-xl border border-slate-800 bg-slate-900/30 p-3 space-y-2">
                   <div className="flex items-center justify-between">
-                    <button
-                      type="button"
-                      onClick={addWorker}
-                      className="rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px] text-slate-100 px-3 py-1.5"
-                    >
-                      + Add Worker
+                    <div className="text-[11px] text-slate-300 font-semibold">Workers</div>
+                    <button type="button" onClick={addWorker} className="text-[11px] text-sky-300 hover:underline">
+                      + Add worker
                     </button>
-
-                    <div className="text-[10px] text-slate-500">Decimals allowed (ex: 33.33). Total must equal 100%.</div>
                   </div>
 
-                  <div className="grid grid-cols-1 md:grid-cols-5 gap-2 text-[11px] text-slate-400 font-semibold mb-1">
-                    <div className="md:col-span-2">Name</div>
-                    <div>Minutes</div>
-                    <div>%</div>
-                    <div>Payout</div>
-                  </div>
+                  {formState.workers.map((w, idx) => (
+                    <div key={idx} className="grid grid-cols-1 md:grid-cols-5 gap-2 items-end">
+                      <div className="md:col-span-2">
+                        <label className="block text-[10px] text-slate-500 mb-1">Name</label>
+                        <input
+                          className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
+                          value={w.name}
+                          onChange={(e) => handleWorkerChange(idx, "name", e.target.value)}
+                          placeholder="Worker name"
+                        />
+                      </div>
 
-                  <datalist id="precisionpulse-worker-options">
-                    {workforceOptionsForForm.map((name) => (
-                      <option key={name} value={name} />
-                    ))}
-                  </datalist>
+                      <div>
+                        <label className="block text-[10px] text-slate-500 mb-1">Minutes</label>
+                        <input
+                          type="number"
+                          className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
+                          value={w.minutesWorked}
+                          onChange={(e) => handleWorkerChange(idx, "minutesWorked", e.target.value)}
+                        />
+                      </div>
 
-                  {(formState.workers || []).map((w, idx) => (
-                    <div key={idx} className="grid grid-cols-1 md:grid-cols-5 gap-2 items-center">
-                      <div className="md:col-span-2 flex gap-2 items-start">
-                        <div className="flex-1 space-y-1">
-                          <input
-                            list="precisionpulse-worker-options"
-                            className="w-full rounded-lg bg-slate-950 border border-slate-700 px-2 py-1 text-[11px] text-slate-50"
-                            value={w.name}
-                            onChange={(e) => handleWorkerChange(idx, "name", e.target.value)}
-                            placeholder={
-                              workforceLoading
-                                ? "Loading workers…"
-                                : workforceOptionsForForm.length
-                                ? "Start typing or pick…"
-                                : "No workers for this building/shift"
-                            }
-                          />
-                          <div className="text-[10px] text-slate-600">{workforceOptionsForForm.length} workers available</div>
+                      <div>
+                        <label className="block text-[10px] text-slate-500 mb-1">% Contribution</label>
+                        <input
+                          type="number"
+                          step="0.01"
+                          className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
+                          value={w.percentContribution}
+                          onChange={(e) => handleWorkerChange(idx, "percentContribution", e.target.value)}
+                        />
+                      </div>
+
+                      <div className="flex items-end justify-between gap-2">
+                        <div className="text-[10px] text-slate-500">
+                          Payout:{" "}
+                          <span className="text-emerald-300">
+                            ${(((payForForm * (Number(w.percentContribution) || 0)) / 100) || 0).toFixed(2)}
+                          </span>
                         </div>
-
                         <button
                           type="button"
                           onClick={() => removeWorker(idx)}
-                          className="mt-[2px] rounded-lg border border-slate-700 px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-800"
-                          title="Remove worker"
+                          className="text-[11px] text-rose-300 hover:underline"
                         >
-                          ✕
+                          Remove
                         </button>
-                      </div>
-
-                      <input
-                        type="number"
-                        className="rounded-lg bg-slate-950 border border-slate-700 px-2 py-1 text-[11px] text-slate-50"
-                        value={w.minutesWorked}
-                        onChange={(e) => handleWorkerChange(idx, "minutesWorked", e.target.value)}
-                        min={0}
-                      />
-
-                      <input
-                        type="number"
-                        step="0.01"
-                        className="rounded-lg bg-slate-950 border border-slate-700 px-2 py-1 text-[11px] text-slate-50"
-                        value={w.percentContribution}
-                        onChange={(e) => handleWorkerChange(idx, "percentContribution", e.target.value)}
-                        min={0}
-                        max={100}
-                      />
-
-                      <div className="text-[11px] text-emerald-300">
-                        ${workersWithPayout[idx] ? Number(workersWithPayout[idx].payout).toFixed(2) : "0.00"}
                       </div>
                     </div>
                   ))}
 
-                  <p className="text-[10px] text-slate-500 mt-1">
-                    Pick from the roster (or type). If you use contributions, the total % should be 100%.
-                  </p>
-                </div>
-
-                {error && (
-                  <div className="rounded-lg border border-rose-700 bg-rose-950/40 px-3 py-2 text-[11px] text-rose-100">
-                    {error}
+                  <div className="pt-2 text-[11px] text-slate-400">
+                    % Total:{" "}
+                    <span className={isPercentValid ? "text-emerald-300" : "text-rose-300"}>
+                      {percentSum.toFixed(2)}%
+                    </span>{" "}
+                    {percentSum === 0 ? "(optional)" : ""}
                   </div>
-                )}
+                </div>
 
                 <div className="flex items-center justify-between mt-2">
                   <button

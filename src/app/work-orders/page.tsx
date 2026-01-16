@@ -64,6 +64,9 @@ type ContainerRow = {
   rework_pieces: number;
   work_order_id: string | null;
 
+  // ✅ NEW
+  palletized?: boolean | null;
+
   created_by_user_id?: string | null;
   created_by_email?: string | null;
 };
@@ -77,6 +80,10 @@ type EditContainerFormState = {
   piecesTotal: number;
   skusTotal: number;
   workOrderId: string | null;
+
+  // ✅ NEW
+  palletized: boolean;
+
   workers: WorkerContribution[];
 };
 
@@ -115,7 +122,10 @@ function mapRowToRecord(row: WorkOrderRow): WorkOrderRecord {
   };
 }
 
-function calculateContainerPay(pieces: number): number {
+function calculateContainerPay(pieces: number, palletized: boolean): number {
+  // ✅ Palletized overrides everything
+  if (palletized) return 100;
+
   if (pieces <= 0) return 0;
   if (pieces <= 500) return 100;
   if (pieces <= 1500) return 130;
@@ -184,7 +194,7 @@ function isMissingOwnershipColumnError(err: unknown): boolean {
   );
 }
 
-/** Workforce mapping (same approach you used on Containers page) */
+/** Workforce mapping */
 type WorkforceRow = Record<string, unknown>;
 function mapWorkforceRow(row: WorkforceRow): WorkforceWorker {
   const fullName =
@@ -244,7 +254,11 @@ export default function WorkOrdersPage() {
 
   /** ---------------- Role logic ---------------- */
   const isLead = currentUser?.accessRole === "Lead";
-  const leadBuilding = currentUser?.building || "";
+  const isBuildingManager = currentUser?.accessRole === "Building Manager";
+
+  // Both Leads + Building Managers are restricted to ONLY their building
+  const scopedBuilding = currentUser?.building || "";
+  const isScopedToOneBuilding = (isLead || isBuildingManager) && !!scopedBuilding;
 
   function isOwnerWorkOrder(wo: WorkOrderRecord): boolean {
     if (!currentUser) return false;
@@ -254,9 +268,12 @@ export default function WorkOrdersPage() {
     return byId || byEmail;
   }
 
-  function canLeadEditWorkOrder(wo: WorkOrderRecord): boolean {
-    if (!isLead) return true;
-    return isOwnerWorkOrder(wo);
+  function canEditWorkOrder(wo: WorkOrderRecord): boolean {
+    if (!currentUser) return false;
+    if (isLead) return isOwnerWorkOrder(wo);
+    // Building Manager can edit ANY WO in their building
+    if (isBuildingManager) return wo.building === scopedBuilding;
+    return true;
   }
 
   function isOwnerContainer(c: ContainerRow): boolean {
@@ -267,9 +284,12 @@ export default function WorkOrdersPage() {
     return byId || byEmail;
   }
 
-  function canLeadEditContainer(c: ContainerRow): boolean {
-    if (!isLead) return true;
-    return isOwnerContainer(c);
+  function canEditContainer(c: ContainerRow): boolean {
+    if (!currentUser) return false;
+    if (isLead) return isOwnerContainer(c);
+    // Building Manager can edit ANY container in their building
+    if (isBuildingManager) return c.building === scopedBuilding;
+    return true;
   }
 
   /** ---------------- State (Work Orders) ---------------- */
@@ -288,7 +308,6 @@ export default function WorkOrdersPage() {
   const [loadingWorkOrders, setLoadingWorkOrders] = useState(true);
   const [savingWorkOrders, setSavingWorkOrders] = useState(false);
 
-  // Work order ownership columns support
   const [woOwnershipColsSupported, setWoOwnershipColsSupported] = useState<boolean | null>(null);
 
   /** ---------------- State (Containers inside Work Orders) ---------------- */
@@ -296,7 +315,6 @@ export default function WorkOrdersPage() {
   const [loadingContainers, setLoadingContainers] = useState(true);
   const [savingContainer, setSavingContainer] = useState(false);
 
-  // Containers ownership columns support
   const [cOwnershipColsSupported, setCOwnershipColsSupported] = useState<boolean | null>(null);
 
   const [expandedWorkOrderId, setExpandedWorkOrderId] = useState<string | null>(null);
@@ -316,16 +334,18 @@ export default function WorkOrdersPage() {
     piecesTotal: 0,
     skusTotal: 0,
     workOrderId: null,
+    palletized: false, // ✅ NEW
     workers: [blankWorker()],
   }));
 
-  /** ---------------- Persistence (existing behavior kept) ---------------- */
+  /** ---------------- Persistence ---------------- */
   const persistWorkOrders = useCallback((next: WorkOrderRecord[]) => {
     setWorkOrders(next);
-    if (typeof window !== "undefined") window.localStorage.setItem(WORK_ORDERS_KEY, JSON.stringify(next));
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(WORK_ORDERS_KEY, JSON.stringify(next));
+    }
   }, []);
 
-  // Keep localStorage write for containers too (so nothing else relying on it breaks)
   const persistContainersLocal = useCallback((rows: ContainerRow[]) => {
     try {
       const mappedForLocal = rows.map((row) => ({
@@ -340,8 +360,11 @@ export default function WorkOrdersPage() {
         containerPayTotal: row.pay_total,
         workOrderId: row.work_order_id,
         workers: row.workers || [],
+        palletized: !!row.palletized, // ✅ NEW
       }));
-      if (typeof window !== "undefined") window.localStorage.setItem(CONTAINERS_KEY, JSON.stringify(mappedForLocal));
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem(CONTAINERS_KEY, JSON.stringify(mappedForLocal));
+      }
     } catch (e) {
       logSupabaseError("Failed to write containers to localStorage", e, "warn");
     }
@@ -418,7 +441,8 @@ export default function WorkOrdersPage() {
 
     try {
       let query = supabase.from("work_orders").select("*").order("created_at", { ascending: false });
-      if (isLead && leadBuilding) query = query.eq("building", leadBuilding);
+
+      if (isScopedToOneBuilding) query = query.eq("building", scopedBuilding);
 
       const { data, error } = await query;
       if (error) {
@@ -436,7 +460,7 @@ export default function WorkOrdersPage() {
     } finally {
       setLoadingWorkOrders(false);
     }
-  }, [currentUser, isLead, leadBuilding, persistWorkOrders]);
+  }, [currentUser, isScopedToOneBuilding, scopedBuilding, persistWorkOrders]);
 
   const loadContainers = useCallback(async () => {
     if (!currentUser) return;
@@ -445,7 +469,8 @@ export default function WorkOrdersPage() {
 
     try {
       let query = supabase.from("containers").select("*").order("created_at", { ascending: false });
-      if (isLead && leadBuilding) query = query.eq("building", leadBuilding);
+
+      if (isScopedToOneBuilding) query = query.eq("building", scopedBuilding);
 
       const { data, error } = await query;
       if (error) {
@@ -461,6 +486,7 @@ export default function WorkOrdersPage() {
           work_order_id: row.work_order_id ?? null,
           shift: (row.shift ?? null) as string | null,
           work_date: (row.work_date ?? null) as string | null,
+          palletized: (row as unknown as { palletized?: boolean | null }).palletized ?? null, // ✅ NEW
           created_by_user_id:
             (row as unknown as { created_by_user_id?: string | null }).created_by_user_id ?? null,
           created_by_email:
@@ -475,7 +501,7 @@ export default function WorkOrdersPage() {
     } finally {
       setLoadingContainers(false);
     }
-  }, [currentUser, isLead, leadBuilding, persistContainersLocal]);
+  }, [currentUser, isScopedToOneBuilding, scopedBuilding, persistContainersLocal]);
 
   useEffect(() => {
     if (!currentUser) return;
@@ -484,22 +510,27 @@ export default function WorkOrdersPage() {
   }, [currentUser, refreshWorkOrders, loadContainers]);
 
   useEffect(() => {
-    if (isLead && leadBuilding) {
-      setFilterBuilding((prev) => (prev === "ALL" ? leadBuilding : prev));
-      setBuilding((prev) => (prev === "DC1" ? leadBuilding : prev));
+    if (isScopedToOneBuilding) {
+      setFilterBuilding((prev) => (prev === "ALL" ? scopedBuilding : prev));
+      setBuilding((prev) => (prev === "DC1" || prev === "DC18" ? scopedBuilding : prev));
+      setContainerForm((prev) => ({ ...prev, building: scopedBuilding }));
     }
-  }, [isLead, leadBuilding]);
+  }, [isScopedToOneBuilding, scopedBuilding]);
 
-  // Work order options for container form select
+  /** Work order options */
   useEffect(() => {
     if (!currentUser) return;
 
     async function loadWOOptions() {
       try {
-        const { data, error } = await supabase
+        let q = supabase
           .from("work_orders")
           .select("id, building, status, work_order_code, created_at")
           .order("created_at", { ascending: false });
+
+        if (isScopedToOneBuilding) q = q.eq("building", scopedBuilding);
+
+        const { data, error } = await q;
 
         if (error) {
           logSupabaseError("Error loading WO options", error, "warn");
@@ -523,16 +554,20 @@ export default function WorkOrdersPage() {
     }
 
     loadWOOptions();
-  }, [currentUser]);
+  }, [currentUser, isScopedToOneBuilding, scopedBuilding]);
 
-  // Workforce for datalist
+  /** Workforce */
   useEffect(() => {
     if (!currentUser) return;
 
     async function loadWorkforce() {
       setWorkforceLoading(true);
       try {
-        const { data, error } = await supabase.from("workforce").select("*").order("created_at", { ascending: false });
+        let q = supabase.from("workforce").select("*").order("created_at", { ascending: false });
+
+        if (isScopedToOneBuilding) q = q.eq("building", scopedBuilding);
+
+        const { data, error } = await q;
         if (error) {
           logSupabaseError("Error loading workforce", error, "warn");
           return;
@@ -551,9 +586,9 @@ export default function WorkOrdersPage() {
     }
 
     loadWorkforce();
-  }, [currentUser]);
+  }, [currentUser, isScopedToOneBuilding, scopedBuilding]);
 
-  /** ---------------- Work Orders actions (existing behavior) ---------------- */
+  /** ---------------- Work Orders actions ---------------- */
   function resetWorkOrderForm() {
     setEditingId(null);
     setName("");
@@ -564,8 +599,8 @@ export default function WorkOrdersPage() {
   }
 
   function handleEditWorkOrder(order: WorkOrderRecord) {
-    if (isLead && !canLeadEditWorkOrder(order)) {
-      setError("Leads can only edit their own work orders.");
+    if (!canEditWorkOrder(order)) {
+      setError(isLead ? "Leads can only edit their own work orders." : "Not allowed.");
       return;
     }
 
@@ -578,8 +613,13 @@ export default function WorkOrdersPage() {
   }
 
   async function handleDeleteWorkOrder(order: WorkOrderRecord) {
-    if (isLead && !canLeadEditWorkOrder(order)) {
-      setError("Leads can only delete their own work orders.");
+    if (!canEditWorkOrder(order)) {
+      setError(isLead ? "Leads can only delete their own work orders." : "Not allowed.");
+      return;
+    }
+
+    if (isBuildingManager && order.building !== scopedBuilding) {
+      setError("Building Managers can only delete work orders in their building.");
       return;
     }
 
@@ -601,7 +641,6 @@ export default function WorkOrdersPage() {
         return;
       }
 
-      // Make linked containers unassigned (client-side view will update after reload)
       await loadContainers();
       await refreshWorkOrders();
 
@@ -628,7 +667,7 @@ export default function WorkOrdersPage() {
     setError(null);
 
     try {
-      const effectiveBuilding = isLead && leadBuilding ? leadBuilding : building;
+      const effectiveBuilding = isScopedToOneBuilding ? scopedBuilding : building;
 
       const basePayload: Partial<WorkOrderRow> = {
         building: effectiveBuilding,
@@ -639,12 +678,15 @@ export default function WorkOrdersPage() {
       };
 
       if (editingId) {
-        if (isLead) {
-          const existing = workOrders.find((w) => w.id === editingId);
-          if (!existing || !canLeadEditWorkOrder(existing)) {
-            setError("Leads can only edit their own work orders.");
-            return;
-          }
+        const existing = workOrders.find((w) => w.id === editingId);
+        if (!existing || !canEditWorkOrder(existing)) {
+          setError(isLead ? "Leads can only edit their own work orders." : "Not allowed.");
+          return;
+        }
+
+        if (isBuildingManager && existing.building !== scopedBuilding) {
+          setError("Building Managers can only edit work orders in their building.");
+          return;
         }
 
         const { error } = await supabase.from("work_orders").update(basePayload).eq("id", editingId);
@@ -678,12 +720,11 @@ export default function WorkOrdersPage() {
           return;
         }
 
-        // Auto-open the work order after create (nice UX)
         if (res.data?.id) setExpandedWorkOrderId(String(res.data.id));
       }
 
       await refreshWorkOrders();
-      await loadContainers(); // keep view synced
+      await loadContainers();
       resetWorkOrderForm();
     } catch (e) {
       logSupabaseError("Unexpected error saving work order", e, "error");
@@ -693,7 +734,7 @@ export default function WorkOrdersPage() {
     }
   }
 
-  /** ---------------- Containers actions inside Work Orders ---------------- */
+  /** ---------------- Containers actions ---------------- */
   function resetContainerForm() {
     setContainerForm({
       building: currentUser?.building || BUILDINGS[0] || "DC18",
@@ -703,12 +744,17 @@ export default function WorkOrdersPage() {
       piecesTotal: 0,
       skusTotal: 0,
       workOrderId: null,
+      palletized: false, // ✅ NEW
       workers: [blankWorker()],
     });
   }
 
   function openNewContainerForWorkOrder(wo: WorkOrderRecord) {
-    // Default values match the work order (this is the key "combined" behavior)
+    if (isBuildingManager && wo.building !== scopedBuilding) {
+      setError("Building Managers can only add containers in their building.");
+      return;
+    }
+
     setContainerForm({
       building: wo.building,
       shift: (wo.shift as ShiftName) || "1st",
@@ -717,14 +763,20 @@ export default function WorkOrdersPage() {
       piecesTotal: 0,
       skusTotal: 0,
       workOrderId: wo.id,
+      palletized: false, // ✅ NEW
       workers: [blankWorker()],
     });
     setShowContainerForm(true);
   }
 
   function openEditContainer(row: ContainerRow) {
-    if (isLead && !canLeadEditContainer(row)) {
-      setError("Leads can only edit their own container entries.");
+    if (!canEditContainer(row)) {
+      setError(isLead ? "Leads can only edit their own container entries." : "Not allowed.");
+      return;
+    }
+
+    if (isBuildingManager && row.building !== scopedBuilding) {
+      setError("Building Managers can only edit containers in their building.");
       return;
     }
 
@@ -739,6 +791,7 @@ export default function WorkOrdersPage() {
       piecesTotal: row.pieces_total,
       skusTotal: row.skus_total,
       workOrderId: row.work_order_id ?? null,
+      palletized: !!row.palletized, // ✅ NEW
       workers: existingWorkers.map((w) => ({
         name: w.name ?? "",
         minutesWorked: Number(w.minutesWorked ?? 0),
@@ -777,7 +830,7 @@ export default function WorkOrdersPage() {
 
   const { payForForm, workersWithPayout, percentSum } = useMemo(() => {
     const pieces = containerForm.piecesTotal || 0;
-    const pay = calculateContainerPay(pieces);
+    const pay = calculateContainerPay(pieces, !!containerForm.palletized);
 
     const workers = (containerForm.workers || []).map((w) => {
       const pct = Number(w.percentContribution || 0);
@@ -786,7 +839,7 @@ export default function WorkOrdersPage() {
 
     const sumPct = workers.reduce((sum, w) => sum + (Number(w.percentContribution) || 0), 0);
     return { payForForm: pay, workersWithPayout: workers, percentSum: sumPct };
-  }, [containerForm.piecesTotal, containerForm.workers]);
+  }, [containerForm.piecesTotal, containerForm.workers, containerForm.palletized]);
 
   const isPercentValid = approxEqual(percentSum, 100, 0.02) || approxEqual(percentSum, 0, 0.0001);
 
@@ -797,6 +850,8 @@ export default function WorkOrdersPage() {
     setError(null);
 
     if (!containerForm.containerNo.trim()) return setError("Container number is required.");
+
+    // ✅ Still force piece count even if palletized
     if (containerForm.piecesTotal <= 0) return setError("Pieces total must be greater than 0.");
 
     const finalWorkers = workersWithPayout.filter((w) => w.name.trim() && Number(w.percentContribution) > 0);
@@ -809,8 +864,7 @@ export default function WorkOrdersPage() {
     setSavingContainer(true);
 
     try {
-      const effectiveBuilding =
-        isLead && leadBuilding ? leadBuilding : containerForm.building;
+      const effectiveBuilding = isScopedToOneBuilding ? scopedBuilding : containerForm.building;
 
       const basePayload: Record<string, unknown> = {
         building: effectiveBuilding,
@@ -824,15 +878,20 @@ export default function WorkOrdersPage() {
         rework_pieces: 0,
         workers: finalWorkers,
         work_order_id: containerForm.workOrderId || null,
+
+        // ✅ NEW
+        palletized: !!containerForm.palletized,
       };
 
       if (containerForm.id) {
-        if (isLead) {
-          const existing = containers.find((c) => c.id === containerForm.id);
-          if (!existing || !canLeadEditContainer(existing)) {
-            setError("Leads can only edit their own container entries.");
-            return;
-          }
+        const existing = containers.find((c) => c.id === containerForm.id);
+        if (!existing || !canEditContainer(existing)) {
+          setError(isLead ? "Leads can only edit their own container entries." : "Not allowed.");
+          return;
+        }
+        if (isBuildingManager && existing.building !== scopedBuilding) {
+          setError("Building Managers can only edit containers in their building.");
+          return;
         }
 
         const { error } = await supabase.from("containers").update(basePayload).eq("id", containerForm.id);
@@ -882,11 +941,14 @@ export default function WorkOrdersPage() {
   async function handleDeleteContainer(id: string) {
     const row = containers.find((c) => c.id === id);
 
-    if (isLead) {
-      if (!row || !canLeadEditContainer(row)) {
-        setError("Leads can only delete their own container entries.");
-        return;
-      }
+    if (!row || !canEditContainer(row)) {
+      setError(isLead ? "Leads can only delete their own container entries." : "Not allowed.");
+      return;
+    }
+
+    if (isBuildingManager && row.building !== scopedBuilding) {
+      setError("Building Managers can only delete containers in their building.");
+      return;
     }
 
     if (!confirm("Delete this container? This cannot be undone.")) return;
@@ -914,13 +976,13 @@ export default function WorkOrdersPage() {
   const displayedOrders = useMemo(() => {
     return workOrders
       .filter((wo) => {
-        if (isLead && leadBuilding && wo.building !== leadBuilding) return false;
-        if (filterBuilding !== "ALL" && wo.building !== filterBuilding) return false;
+        if (isScopedToOneBuilding && wo.building !== scopedBuilding) return false;
+        if (!isScopedToOneBuilding && filterBuilding !== "ALL" && wo.building !== filterBuilding) return false;
         if (filterStatus !== "ALL" && wo.status !== filterStatus) return false;
         return true;
       })
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  }, [workOrders, filterBuilding, filterStatus, isLead, leadBuilding]);
+  }, [workOrders, filterBuilding, filterStatus, isScopedToOneBuilding, scopedBuilding]);
 
   const containersForWorkOrder = useCallback(
     (workOrderId: string) =>
@@ -936,7 +998,7 @@ export default function WorkOrdersPage() {
   }, [workOrderOptions, containerForm.building]);
 
   const workforceOptionsForForm = useMemo(() => {
-    const b = (isLead && leadBuilding ? leadBuilding : containerForm.building) || "";
+    const b = (isScopedToOneBuilding ? scopedBuilding : containerForm.building) || "";
     const s = containerForm.shift || "";
 
     const list = workforce
@@ -953,7 +1015,7 @@ export default function WorkOrdersPage() {
       .filter(Boolean);
 
     return Array.from(new Set(list)).sort((a, b) => a.localeCompare(b));
-  }, [workforce, containerForm.building, containerForm.shift, isLead, leadBuilding]);
+  }, [workforce, containerForm.building, containerForm.shift, isScopedToOneBuilding, scopedBuilding]);
 
   function renderContainerTable(rows: ContainerRow[]) {
     return (
@@ -965,6 +1027,7 @@ export default function WorkOrdersPage() {
               <th className="text-left py-2 pr-3">Building</th>
               <th className="text-left py-2 pr-3">Shift</th>
               <th className="text-left py-2 pr-3">Container #</th>
+              <th className="text-left py-2 pr-3">Type</th>
               <th className="text-right py-2 pr-3">Pieces</th>
               <th className="text-right py-2 pr-3">SKUs</th>
               <th className="text-right py-2 pr-3">Pay Total</th>
@@ -974,15 +1037,19 @@ export default function WorkOrdersPage() {
           </thead>
           <tbody>
             {rows.map((c) => {
-              const leadBlocked = isLead && !canLeadEditContainer(c);
+              const blocked = !canEditContainer(c);
+
               return (
                 <tr key={c.id} className="border-b border-slate-800/60 hover:bg-slate-900/70">
                   <td className="py-2 pr-3 text-[11px] text-slate-400">
-                    {c.work_date ? String(c.work_date).slice(0, 10) : new Date(c.created_at).toISOString().slice(0, 10)}
+                    {c.work_date
+                      ? String(c.work_date).slice(0, 10)
+                      : new Date(c.created_at).toISOString().slice(0, 10)}
                   </td>
                   <td className="py-2 pr-3 text-[11px] text-slate-200">{c.building}</td>
                   <td className="py-2 pr-3 text-[11px] text-slate-200">{c.shift ?? "—"}</td>
                   <td className="py-2 pr-3 text-[11px] text-slate-200">{c.container_no}</td>
+                  <td className="py-2 pr-3 text-[11px] text-slate-200">{c.palletized ? "Palletized" : "Loose"}</td>
                   <td className="py-2 pr-3 text-right text-[11px] text-slate-200">{c.pieces_total}</td>
                   <td className="py-2 pr-3 text-right text-[11px] text-slate-200">{c.skus_total}</td>
                   <td className="py-2 pr-3 text-right text-[11px] text-emerald-300">
@@ -991,7 +1058,10 @@ export default function WorkOrdersPage() {
                   <td className="py-2 pr-3 text-[11px] text-slate-300">
                     {(c.workers || [])
                       .filter((w) => w.name)
-                      .map((w) => `${w.name} (${Number(w.percentContribution).toFixed(2)}% · $${Number(w.payout).toFixed(2)})`)
+                      .map(
+                        (w) =>
+                          `${w.name} (${Number(w.percentContribution).toFixed(2)}% · $${Number(w.payout).toFixed(2)})`
+                      )
                       .join(", ") || "—"}
                   </td>
                   <td className="py-2 pl-3 text-right">
@@ -999,8 +1069,14 @@ export default function WorkOrdersPage() {
                       <button
                         className="px-3 py-1 rounded-lg bg-slate-800 text-[11px] text-slate-100 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed"
                         onClick={() => openEditContainer(c)}
-                        disabled={leadBlocked}
-                        title={leadBlocked ? "Leads can only edit their own entries." : "Edit"}
+                        disabled={blocked}
+                        title={
+                          blocked
+                            ? isLead
+                              ? "Leads can only edit their own entries."
+                              : "Not allowed."
+                            : "Edit"
+                        }
                         type="button"
                       >
                         Edit
@@ -1008,8 +1084,14 @@ export default function WorkOrdersPage() {
                       <button
                         className="px-3 py-1 rounded-lg bg-rose-700 text-[11px] text-white hover:bg-rose-600 disabled:opacity-50 disabled:cursor-not-allowed"
                         onClick={() => handleDeleteContainer(c.id)}
-                        disabled={savingContainer || leadBlocked}
-                        title={leadBlocked ? "Leads can only delete their own entries." : "Delete"}
+                        disabled={savingContainer || blocked}
+                        title={
+                          blocked
+                            ? isLead
+                              ? "Leads can only delete their own entries."
+                              : "Not allowed."
+                            : "Delete"
+                        }
                         type="button"
                       >
                         Delete
@@ -1063,14 +1145,18 @@ export default function WorkOrdersPage() {
         )}
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* LEFT: Work Order create/edit */}
+          {/* LEFT */}
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 text-xs space-y-3">
             <div className="flex items-center justify-between mb-1">
               <div className="text-slate-200 text-sm font-semibold">
                 {editingId ? "Edit Work Order" : "Create Work Order"}
               </div>
               {editingId && (
-                <button type="button" onClick={resetWorkOrderForm} className="text-[11px] text-sky-300 hover:underline">
+                <button
+                  type="button"
+                  onClick={resetWorkOrderForm}
+                  className="text-[11px] text-sky-300 hover:underline"
+                >
                   Clear / New
                 </button>
               )}
@@ -1094,10 +1180,10 @@ export default function WorkOrdersPage() {
                     className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
                     value={building}
                     onChange={(e) => setBuilding(e.target.value)}
-                    disabled={isLead && !!leadBuilding}
+                    disabled={isScopedToOneBuilding}
                   >
                     {BUILDINGS.map((b) => {
-                      if (isLead && leadBuilding && b !== leadBuilding) return null;
+                      if (isScopedToOneBuilding && b !== scopedBuilding) return null;
                       return (
                         <option key={b} value={b}>
                           {b}
@@ -1171,7 +1257,7 @@ export default function WorkOrdersPage() {
             </form>
           </div>
 
-          {/* RIGHT: Filters + Work Order accordion with containers inside */}
+          {/* RIGHT */}
           <div className="lg:col-span-2 space-y-4">
             <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 text-xs">
               <div className="flex items-center justify-between mb-3">
@@ -1183,8 +1269,8 @@ export default function WorkOrdersPage() {
                   type="button"
                   onClick={() => {
                     setFilterStatus("ALL");
-                    if (!isLead) setFilterBuilding("ALL");
-                    else if (leadBuilding) setFilterBuilding(leadBuilding);
+                    if (!isScopedToOneBuilding) setFilterBuilding("ALL");
+                    else setFilterBuilding(scopedBuilding);
                   }}
                   className="text-[11px] text-sky-300 hover:underline"
                 >
@@ -1199,11 +1285,11 @@ export default function WorkOrdersPage() {
                     className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
                     value={filterBuilding}
                     onChange={(e) => setFilterBuilding(e.target.value)}
-                    disabled={isLead && !!leadBuilding}
+                    disabled={isScopedToOneBuilding}
                   >
-                    {!isLead && <option value="ALL">All Buildings</option>}
+                    {!isScopedToOneBuilding && <option value="ALL">All Buildings</option>}
                     {BUILDINGS.map((b) => {
-                      if (isLead && leadBuilding && b !== leadBuilding) return null;
+                      if (isScopedToOneBuilding && b !== scopedBuilding) return null;
                       return (
                         <option key={b} value={b}>
                           {b}
@@ -1265,7 +1351,7 @@ export default function WorkOrdersPage() {
                     const piecesSum = rows.reduce((sum, c) => sum + (c.pieces_total || 0), 0);
                     const paySum = rows.reduce((sum, c) => sum + (Number(c.pay_total) || 0), 0);
 
-                    const leadBlockedWO = isLead && !canLeadEditWorkOrder(wo);
+                    const blockedWO = !canEditWorkOrder(wo);
 
                     return (
                       <div key={wo.id} className="rounded-xl border border-slate-800 bg-slate-950">
@@ -1324,8 +1410,14 @@ export default function WorkOrdersPage() {
                                   type="button"
                                   onClick={() => handleEditWorkOrder(wo)}
                                   className="text-[11px] text-sky-300 hover:underline disabled:opacity-50 disabled:cursor-not-allowed"
-                                  disabled={leadBlockedWO}
-                                  title={leadBlockedWO ? "Leads can only edit their own work orders." : "Edit Work Order"}
+                                  disabled={blockedWO}
+                                  title={
+                                    blockedWO
+                                      ? isLead
+                                        ? "Leads can only edit their own work orders."
+                                        : "Not allowed."
+                                      : "Edit Work Order"
+                                  }
                                 >
                                   Edit WO
                                 </button>
@@ -1334,8 +1426,14 @@ export default function WorkOrdersPage() {
                                   type="button"
                                   onClick={() => handleDeleteWorkOrder(wo)}
                                   className="text-[11px] text-rose-300 hover:underline disabled:opacity-50 disabled:cursor-not-allowed"
-                                  disabled={savingWorkOrders || leadBlockedWO}
-                                  title={leadBlockedWO ? "Leads can only delete their own work orders." : "Delete Work Order"}
+                                  disabled={savingWorkOrders || blockedWO}
+                                  title={
+                                    blockedWO
+                                      ? isLead
+                                        ? "Leads can only delete their own work orders."
+                                        : "Not allowed."
+                                      : "Delete Work Order"
+                                  }
                                 >
                                   Delete WO
                                 </button>
@@ -1360,7 +1458,7 @@ export default function WorkOrdersPage() {
           </div>
         </div>
 
-        {/* ---------------- Container Modal (inside Work Orders page) ---------------- */}
+        {/* ---------------- Container Modal ---------------- */}
         {showContainerForm && (
           <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
             <div className="w-full max-w-2xl rounded-2xl bg-slate-950 border border-slate-800 shadow-xl p-6 text-xs">
@@ -1390,10 +1488,10 @@ export default function WorkOrdersPage() {
                       onChange={(e) =>
                         setContainerForm((prev) => ({ ...prev, building: e.target.value, workOrderId: null }))
                       }
-                      disabled={isLead && !!leadBuilding}
+                      disabled={isScopedToOneBuilding}
                     >
                       {BUILDINGS.map((b) => {
-                        if (isLead && leadBuilding && b !== leadBuilding) return null;
+                        if (isScopedToOneBuilding && b !== scopedBuilding) return null;
                         return (
                           <option key={b} value={b}>
                             {b}
@@ -1437,156 +1535,166 @@ export default function WorkOrdersPage() {
                       placeholder="e.g., MSKU1234567"
                     />
                   </div>
+
+                  {/* ✅ NEW: Palletized checkbox + pay display */}
+                  <div className="md:col-span-4 flex items-center gap-2 pt-1">
+                    <input
+                      id="palletized"
+                      type="checkbox"
+                      className="h-4 w-4"
+                      checked={!!containerForm.palletized}
+                      onChange={(e) => setContainerForm((prev) => ({ ...prev, palletized: e.target.checked }))}
+                    />
+                    <label htmlFor="palletized" className="text-[11px] text-slate-200">
+                      Palletized (flat $100 — overrides payscale)
+                    </label>
+
+                    <div className="ml-auto text-[11px] text-slate-400">
+                      Pay Total: <span className="text-emerald-300 font-semibold">${payForForm.toFixed(2)}</span>
+                    </div>
+                  </div>
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  <div>
+                    <label className="block text-[11px] text-slate-400 mb-1">Work Order (optional)</label>
+                    <select
+                      className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
+                      value={containerForm.workOrderId ?? ""}
+                      onChange={(e) => setContainerForm((prev) => ({ ...prev, workOrderId: e.target.value || null }))}
+                    >
+                      <option value="">Unassigned</option>
+                      {workOrdersForBuildingInForm.map((wo) => (
+                        <option key={wo.id} value={wo.id}>
+                          {wo.name} ({wo.status})
+                        </option>
+                      ))}
+                    </select>
+                    <div className="mt-1 text-[10px] text-slate-500">
+                      Only work orders for the selected building appear here.
+                    </div>
+                  </div>
+
                   <div>
                     <label className="block text-[11px] text-slate-400 mb-1">Pieces Total</label>
                     <input
                       type="number"
+                      min={0}
                       className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
                       value={containerForm.piecesTotal}
-                      onChange={(e) =>
-                        setContainerForm((prev) => ({ ...prev, piecesTotal: Number(e.target.value) || 0 }))
-                      }
-                      min={0}
+                      onChange={(e) => setContainerForm((prev) => ({ ...prev, piecesTotal: Number(e.target.value) || 0 }))}
                     />
-                  </div>
-
-                  <div>
-                    <label className="block text-[11px] text-slate-400 mb-1">SKU Count</label>
-                    <input
-                      type="number"
-                      className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
-                      value={containerForm.skusTotal}
-                      onChange={(e) =>
-                        setContainerForm((prev) => ({ ...prev, skusTotal: Number(e.target.value) || 0 }))
-                      }
-                      min={0}
-                    />
-                  </div>
-                </div>
-
-                <div>
-                  <label className="block text-[11px] text-slate-400 mb-1">Work Order (optional)</label>
-                  <select
-                    className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
-                    value={containerForm.workOrderId || ""}
-                    onChange={(e) =>
-                      setContainerForm((prev) => ({ ...prev, workOrderId: e.target.value || null }))
-                    }
-                  >
-                    <option value="">Unassigned</option>
-                    {workOrdersForBuildingInForm.map((wo) => (
-                      <option key={wo.id} value={wo.id}>
-                        {wo.name} ({wo.status})
-                      </option>
-                    ))}
-                  </select>
-                  <p className="mt-1 text-[10px] text-slate-500">Only work orders for this building are shown.</p>
-                </div>
-
-                {/* Worker Contributions */}
-                <div className="rounded-xl bg-slate-900 border border-slate-800 p-3 space-y-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="text-[11px] text-slate-300 font-semibold">Worker Contributions</div>
-
-                    <div className="flex items-center gap-3 text-[11px] text-slate-400">
-                      <div>
-                        Total %:{" "}
-                        <span className={isPercentValid ? "text-emerald-300" : "text-rose-300"}>
-                          {percentSum.toFixed(2)}%
-                        </span>
-                      </div>
-                      <div>
-                        Container Pay: <span className="text-emerald-300">${payForForm.toFixed(2)}</span>
-                      </div>
+                    <div className="mt-1 text-[10px] text-slate-500">
+                      Pieces are still required even if Palletized is checked.
                     </div>
                   </div>
 
+                  <div>
+                    <label className="block text-[11px] text-slate-400 mb-1">SKUs Total</label>
+                    <input
+                      type="number"
+                      min={0}
+                      className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
+                      value={containerForm.skusTotal}
+                      onChange={(e) => setContainerForm((prev) => ({ ...prev, skusTotal: Number(e.target.value) || 0 }))}
+                    />
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-slate-800 bg-slate-900/30 px-3 py-2">
                   <div className="flex items-center justify-between">
-                    <button
-                      type="button"
-                      onClick={addWorker}
-                      className="rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px] text-slate-100 px-3 py-1.5"
-                    >
+                    <div className="text-[11px] text-slate-400">Calculated Container Pay</div>
+                    <div className="text-[12px] font-semibold text-emerald-300">${payForForm.toFixed(2)}</div>
+                  </div>
+                  <div className="mt-1 text-[10px] text-slate-500">
+                    Percent total:{" "}
+                    <span className={isPercentValid ? "text-emerald-300" : "text-rose-300"}>
+                      {percentSum.toFixed(2)}%
+                    </span>{" "}
+                    {workforceLoading ? "· loading workforce…" : ""}
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-slate-800 bg-slate-950 p-3 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="text-[12px] font-semibold text-slate-200">Workers</div>
+                    <button type="button" onClick={addWorker} className="text-[11px] text-sky-300 hover:underline">
                       + Add Worker
                     </button>
-
-                    <div className="text-[10px] text-slate-500">Decimals allowed (ex: 33.33). Total must equal 100%.</div>
                   </div>
 
-                  <div className="grid grid-cols-1 md:grid-cols-5 gap-2 text-[11px] text-slate-400 font-semibold mb-1">
-                    <div className="md:col-span-2">Name</div>
-                    <div>Minutes</div>
-                    <div>%</div>
-                    <div>Payout</div>
-                  </div>
-
-                  <datalist id="precisionpulse-worker-options">
+                  <datalist id="workforceNames">
                     {workforceOptionsForForm.map((n) => (
                       <option key={n} value={n} />
                     ))}
                   </datalist>
 
-                  {(containerForm.workers || []).map((w, idx) => (
-                    <div key={idx} className="grid grid-cols-1 md:grid-cols-5 gap-2 items-center">
-                      <div className="md:col-span-2 flex gap-2 items-start">
-                        <div className="flex-1 space-y-1">
+                  {workersWithPayout.map((w, idx) => {
+                    const showRemove = workersWithPayout.length > 1;
+                    return (
+                      <div key={idx} className="grid grid-cols-1 md:grid-cols-12 gap-2 items-end">
+                        <div className="md:col-span-5">
+                          <label className="block text-[10px] text-slate-500 mb-1">Worker Name</label>
                           <input
-                            list="precisionpulse-worker-options"
-                            className="w-full rounded-lg bg-slate-950 border border-slate-700 px-2 py-1 text-[11px] text-slate-50"
+                            list="workforceNames"
+                            className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
                             value={w.name}
                             onChange={(e) => handleWorkerChange(idx, "name", e.target.value)}
-                            placeholder={
-                              workforceLoading
-                                ? "Loading workers…"
-                                : workforceOptionsForForm.length
-                                ? "Start typing or pick…"
-                                : "No workers for this building/shift"
-                            }
+                            placeholder="Start typing…"
                           />
-                          <div className="text-[10px] text-slate-600">{workforceOptionsForForm.length} workers available</div>
                         </div>
 
-                        <button
-                          type="button"
-                          onClick={() => removeWorker(idx)}
-                          className="mt-[2px] rounded-lg border border-slate-700 px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-800"
-                          title="Remove worker"
-                        >
-                          ✕
-                        </button>
+                        <div className="md:col-span-3">
+                          <label className="block text-[10px] text-slate-500 mb-1">Minutes</label>
+                          <input
+                            type="number"
+                            min={0}
+                            className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
+                            value={w.minutesWorked}
+                            onChange={(e) => handleWorkerChange(idx, "minutesWorked", e.target.value)}
+                          />
+                        </div>
+
+                        <div className="md:col-span-2">
+                          <label className="block text-[10px] text-slate-500 mb-1">% Split</label>
+                          <input
+                            type="number"
+                            step="0.01"
+                            min={0}
+                            className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-50"
+                            value={w.percentContribution}
+                            onChange={(e) => handleWorkerChange(idx, "percentContribution", e.target.value)}
+                          />
+                        </div>
+
+                        <div className="md:col-span-1">
+                          <label className="block text-[10px] text-slate-500 mb-1">Payout</label>
+                          <div className="rounded-lg border border-slate-800 bg-slate-900/40 px-2 py-1.5 text-[11px] text-emerald-300 text-right">
+                            ${Number(w.payout).toFixed(2)}
+                          </div>
+                        </div>
+
+                        <div className="md:col-span-1 flex justify-end">
+                          {showRemove && (
+                            <button
+                              type="button"
+                              onClick={() => removeWorker(idx)}
+                              className="text-[11px] text-rose-300 hover:underline"
+                              title="Remove worker"
+                            >
+                              Remove
+                            </button>
+                          )}
+                        </div>
                       </div>
+                    );
+                  })}
 
-                      <input
-                        type="number"
-                        className="rounded-lg bg-slate-950 border border-slate-700 px-2 py-1 text-[11px] text-slate-50"
-                        value={w.minutesWorked}
-                        onChange={(e) => handleWorkerChange(idx, "minutesWorked", e.target.value)}
-                        min={0}
-                      />
-
-                      <input
-                        type="number"
-                        step="0.01"
-                        className="rounded-lg bg-slate-950 border border-slate-700 px-2 py-1 text-[11px] text-slate-50"
-                        value={w.percentContribution}
-                        onChange={(e) => handleWorkerChange(idx, "percentContribution", e.target.value)}
-                        min={0}
-                        max={100}
-                      />
-
-                      <div className="text-[11px] text-emerald-300">
-                        $
-                        {workersWithPayout[idx] ? Number(workersWithPayout[idx].payout).toFixed(2) : "0.00"}
-                      </div>
+                  {!isPercentValid && percentSum !== 0 && (
+                    <div className="text-[11px] text-rose-300">
+                      Worker % must total 100% (decimals allowed). Currently {percentSum.toFixed(2)}%.
                     </div>
-                  ))}
-
-                  <p className="text-[10px] text-slate-500 mt-1">
-                    Pick from the roster (or type). If you use contributions, the total % should be 100%.
-                  </p>
+                  )}
                 </div>
 
                 <div className="flex items-center justify-between mt-2">
