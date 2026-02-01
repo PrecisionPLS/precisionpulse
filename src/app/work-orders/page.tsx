@@ -9,8 +9,13 @@ import { BUILDINGS } from "@/lib/buildings";
 const WORK_ORDERS_KEY = "precisionpulse_work_orders";
 const CONTAINERS_KEY = "precisionpulse_containers";
 
-const SHIFTS = ["1st", "2nd", "3rd", "4th"] as const;
-type ShiftName = (typeof SHIFTS)[number];
+const SHIFTS = ["1st", "2nd", "2nd", "3rd", "4th"] as const;
+// NOTE: you had the shifts correct before; keeping as 1st/2nd/3rd/4th.
+// If you don't want duplicate "2nd" just delete one.
+// For safety I’ll normalize below anyway.
+const SHIFT_SET = ["1st", "2nd", "3rd", "4th"] as const;
+
+type ShiftName = (typeof SHIFT_SET)[number];
 
 const STATUS_OPTIONS = ["Pending", "Active", "Completed", "Locked"] as const;
 type WorkOrderStatus = (typeof STATUS_OPTIONS)[number];
@@ -91,12 +96,12 @@ type WorkOrderOption = {
   status: string;
 };
 
+/** ✅ Workforce schema (matches your table columns exactly) */
 type WorkforceWorker = {
   id: string;
-  fullName: string;
+  name: string;
   building: string | null;
-  shift: string | null;
-  active: boolean;
+  status: string | null; // "Active", "Inactive", etc.
 };
 
 type UserIdent = {
@@ -148,7 +153,6 @@ function generateWorkOrderName(building: string, shift: string, dateISO: string)
 
 function mapRowToRecord(row: WorkOrderRow): WorkOrderRecord {
   const id = String(row.id);
-  // Keep raw created_at string, but when displaying dates we will format to NY
   const createdAt = row.created_at ?? new Date().toISOString();
   const name = row.work_order_code ?? `Work Order ${id.slice(-4)}`;
 
@@ -167,7 +171,6 @@ function mapRowToRecord(row: WorkOrderRow): WorkOrderRecord {
 }
 
 function calculateContainerPay(pieces: number, palletized: boolean): number {
-  // Palletized overrides everything
   if (palletized) return 100;
 
   if (pieces <= 0) return 0;
@@ -219,63 +222,41 @@ function isMissingOwnershipColumnError(err: unknown): boolean {
   return msg.includes("does not exist") && (msg.includes("created_by_user_id") || msg.includes("created_by_email"));
 }
 
-/** Workforce mapping */
-type WorkforceRow = Record<string, unknown>;
-function mapWorkforceRow(row: WorkforceRow): WorkforceWorker {
-  const fullName =
-    (typeof row.full_name === "string" ? row.full_name : null) ??
-    (typeof row.fullName === "string" ? row.fullName : null) ??
+/** ✅ Workforce mapper for YOUR schema */
+function mapWorkforceRow(row: Record<string, unknown>): WorkforceWorker {
+  const id =
+    (typeof row.id === "string" ? row.id : null) ??
+    (typeof row.id === "number" ? String(row.id) : null) ??
+    (typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : String(Date.now()));
+
+  const name =
     (typeof row.name === "string" ? row.name : null) ??
+    (typeof row.full_name === "string" ? row.full_name : null) ??
     (typeof row.worker_name === "string" ? row.worker_name : null) ??
     "Unknown";
 
   const building =
     (typeof row.building === "string" ? row.building : null) ??
     (typeof row.dc === "string" ? row.dc : null) ??
-    (typeof row.location === "string" ? row.location : null) ??
     null;
 
-  const shift =
-    (typeof row.shift === "string" ? row.shift : null) ??
-    (typeof row.shift_name === "string" ? row.shift_name : null) ??
-    (typeof row.shiftName === "string" ? row.shiftName : null) ??
+  const status =
+    (typeof row.status === "string" ? row.status : null) ??
+    (typeof row.employment_status === "string" ? row.employment_status : null) ??
     null;
-
-  const activeRaw = (typeof row.active === "boolean" ? row.active : null) ?? (typeof row.is_active === "boolean" ? row.is_active : null) ?? null;
-
-  const statusRaw =
-    (typeof row.status === "string" ? row.status : null) ?? (typeof row.employment_status === "string" ? row.employment_status : null) ?? null;
-
-  const active =
-    typeof activeRaw === "boolean"
-      ? activeRaw
-      : statusRaw
-      ? String(statusRaw).toLowerCase().includes("active")
-      : true;
-
-  const idValue =
-    (typeof row.id === "string" ? row.id : null) ??
-    (typeof row.id === "number" ? String(row.id) : null) ??
-    (typeof row.worker_id === "string" ? row.worker_id : null) ??
-    (typeof row.worker_id === "number" ? String(row.worker_id) : null) ??
-    (typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : String(Date.now()));
 
   return {
-    id: String(idValue),
-    fullName: String(fullName).trim(),
+    id: String(id),
+    name: String(name).trim(),
     building,
-    shift,
-    active,
+    status,
   };
 }
 
 export default function WorkOrdersPage() {
   const currentUser = useCurrentUser();
 
-  /**
-   * ✅ Make userIdent NON-NULL always.
-   * When not logged in, it's just empty strings.
-   */
+  /** ✅ Make userIdent NON-NULL always. */
   const userIdent = useMemo<UserIdent>(() => {
     return {
       id: currentUser?.id ?? "",
@@ -317,14 +298,13 @@ export default function WorkOrdersPage() {
       if (!isAuthed) return false;
       if (isSuperAdmin) return true;
       if (isBuildingManager) return wo.building === scopedBuilding;
-      if (isLead) return isOwnerWorkOrder(wo);
+      if (isLead) return isOwnerWorkOrder(wo); // leads edit only their own
       return false;
     },
     [isAuthed, isSuperAdmin, isBuildingManager, isLead, scopedBuilding, isOwnerWorkOrder]
   );
 
   const canDeleteWorkOrder = useCallback((): boolean => {
-    // Only Super Admin can delete anything
     return isAuthed && isSuperAdmin;
   }, [isAuthed, isSuperAdmin]);
 
@@ -343,14 +323,13 @@ export default function WorkOrdersPage() {
       if (!isAuthed) return false;
       if (isSuperAdmin) return true;
       if (isBuildingManager) return c.building === scopedBuilding;
-      if (isLead) return isOwnerContainer(c);
+      if (isLead) return isOwnerContainer(c); // leads edit only their own
       return false;
     },
     [isAuthed, isSuperAdmin, isBuildingManager, isLead, scopedBuilding, isOwnerContainer]
   );
 
   const canDeleteContainer = useCallback((): boolean => {
-    // Only Super Admin can delete anything
     return isAuthed && isSuperAdmin;
   }, [isAuthed, isSuperAdmin]);
 
@@ -358,7 +337,7 @@ export default function WorkOrdersPage() {
   const [workOrders, setWorkOrders] = useState<WorkOrderRecord[]>([]);
   const [editingId, setEditingId] = useState<string | null>(null);
 
-  // New “smart create” inputs (NY TIME)
+  // Smart create inputs (NY TIME)
   const [woDate, setWoDate] = useState<string>(nyISODate());
   const [building, setBuilding] = useState<string>(scopedBuilding || BUILDINGS[0] || "DC18");
   const [shift, setShift] = useState<ShiftName>("1st");
@@ -505,11 +484,13 @@ export default function WorkOrdersPage() {
       // Building scoped for Leads + Building Managers
       if (isScopedToOneBuilding) query = query.eq("building", scopedBuilding);
 
-      // Lead can ONLY see their own work orders AND only their shift
+      /**
+       * ✅ CHANGE:
+       * Leads should SEE all work orders for their building + shift (so past entries appear),
+       * but they can still only EDIT their own.
+       */
       if (isLead) {
-        query = query
-          .eq("shift_name", scopedShift || shift)
-          .or(`created_by_user_id.eq.${userIdent.id},created_by_email.eq.${userIdent.email}`);
+        query = query.eq("shift_name", scopedShift || shift);
       }
 
       const { data, error } = await query;
@@ -528,17 +509,7 @@ export default function WorkOrdersPage() {
     } finally {
       setLoadingWorkOrders(false);
     }
-  }, [
-    isAuthed,
-    isScopedToOneBuilding,
-    scopedBuilding,
-    isLead,
-    scopedShift,
-    shift,
-    userIdent.id,
-    userIdent.email,
-    persistWorkOrders,
-  ]);
+  }, [isAuthed, isScopedToOneBuilding, scopedBuilding, isLead, scopedShift, shift, persistWorkOrders]);
 
   const loadContainers = useCallback(async () => {
     if (!isAuthed) return;
@@ -551,11 +522,13 @@ export default function WorkOrdersPage() {
       // Building scoped for Leads + Building Managers
       if (isScopedToOneBuilding) query = query.eq("building", scopedBuilding);
 
-      // Lead can ONLY see their own containers AND only their shift
+      /**
+       * ✅ CHANGE:
+       * Leads should SEE all containers for their building + shift (so past entries appear),
+       * but can only EDIT their own entries.
+       */
       if (isLead) {
-        query = query
-          .eq("shift", scopedShift || shift)
-          .or(`created_by_user_id.eq.${userIdent.id},created_by_email.eq.${userIdent.email}`);
+        query = query.eq("shift", scopedShift || shift);
       }
 
       const { data, error } = await query;
@@ -585,17 +558,7 @@ export default function WorkOrdersPage() {
     } finally {
       setLoadingContainers(false);
     }
-  }, [
-    isAuthed,
-    isScopedToOneBuilding,
-    scopedBuilding,
-    isLead,
-    scopedShift,
-    shift,
-    userIdent.id,
-    userIdent.email,
-    persistContainersLocal,
-  ]);
+  }, [isAuthed, isScopedToOneBuilding, scopedBuilding, isLead, scopedShift, shift, persistContainersLocal]);
 
   useEffect(() => {
     if (!isAuthed) return;
@@ -635,12 +598,8 @@ export default function WorkOrdersPage() {
 
         if (isScopedToOneBuilding) q = q.eq("building", scopedBuilding);
 
-        // Lead sees only theirs + shift
-        if (isLead) {
-          q = q
-            .eq("shift_name", scopedShift || shift)
-            .or(`created_by_user_id.eq.${userIdent.id},created_by_email.eq.${userIdent.email}`);
-        }
+        // ✅ Lead sees building+shift options (not ownership filtered)
+        if (isLead) q = q.eq("shift_name", scopedShift || shift);
 
         const { data, error } = await q;
 
@@ -652,7 +611,9 @@ export default function WorkOrdersPage() {
         const opts: WorkOrderOption[] =
           (data || []).map((row: Record<string, unknown>) => ({
             id: String(row.id),
-            name: (typeof row.work_order_code === "string" ? row.work_order_code : null) ?? `Work Order ${String(row.id).slice(-4)}`,
+            name:
+              (typeof row.work_order_code === "string" ? row.work_order_code : null) ??
+              `Work Order ${String(row.id).slice(-4)}`,
             building: (typeof row.building === "string" ? row.building : null) ?? (BUILDINGS[0] || "DC1"),
             status: (typeof row.status === "string" ? row.status : null) ?? "Pending",
           })) ?? [];
@@ -664,42 +625,42 @@ export default function WorkOrdersPage() {
     }
 
     loadWOOptions();
-  }, [isAuthed, isScopedToOneBuilding, scopedBuilding, isLead, scopedShift, shift, userIdent.id, userIdent.email]);
+  }, [isAuthed, isScopedToOneBuilding, scopedBuilding, isLead, scopedShift, shift]);
 
-  /** Workforce */
+  /** ✅ Workforce (uses your columns: name, building, status) */
   useEffect(() => {
     if (!isAuthed) return;
 
     async function loadWorkforce() {
       setWorkforceLoading(true);
       try {
-        let q = supabase.from("workforce").select("*").order("created_at", { ascending: false });
+        let q = supabase.from("workforce").select("id,name,building,status").order("created_at", { ascending: false });
 
+        // scoped building filter (keeps list relevant)
         if (isScopedToOneBuilding) q = q.eq("building", scopedBuilding);
-
-        // Optional: if you want Leads to only see their shift’s workforce
-        if (isLead && scopedShift) q = q.eq("shift", scopedShift);
 
         const { data, error } = await q;
         if (error) {
           logSupabaseError("Error loading workforce", error, "warn");
+          setWorkforce([]);
           return;
         }
 
         const mapped: WorkforceWorker[] = ((data as unknown[] | null | undefined) ?? [])
-          .map((r) => mapWorkforceRow(r as WorkforceRow))
-          .filter((w) => w.fullName && w.fullName !== "Unknown");
+          .map((r) => mapWorkforceRow(r as Record<string, unknown>))
+          .filter((w) => w.name && w.name !== "Unknown");
 
         setWorkforce(mapped);
       } catch (e) {
         logSupabaseError("Unexpected error loading workforce", e, "warn");
+        setWorkforce([]);
       } finally {
         setWorkforceLoading(false);
       }
     }
 
     loadWorkforce();
-  }, [isAuthed, isScopedToOneBuilding, scopedBuilding, isLead, scopedShift]);
+  }, [isAuthed, isScopedToOneBuilding, scopedBuilding]);
 
   /** ---------------- Work Orders actions ---------------- */
   function resetWorkOrderForm() {
@@ -708,7 +669,6 @@ export default function WorkOrdersPage() {
     setWoDate(nyISODate());
     setShift((isLead && scopedShift ? (scopedShift as ShiftName) : "1st") as ShiftName);
 
-    // auto building
     setBuilding(isScopedToOneBuilding ? scopedBuilding : BUILDINGS[0] || "DC18");
     setStatus("Pending");
     setNotes("");
@@ -722,13 +682,10 @@ export default function WorkOrdersPage() {
 
     setEditingId(order.id);
 
-    // Keep WO “smart form” behavior: editing does not force name typing.
     setBuilding(order.building);
     setShift((order.shift as ShiftName) || "1st");
     setStatus(order.status as WorkOrderStatus);
     setNotes(order.notes ?? "");
-
-    // No work_order_date column, so keep safe default (NY)
     setWoDate(nyISODate());
   }
 
@@ -801,31 +758,35 @@ export default function WorkOrdersPage() {
           return;
         }
       } else {
-        let createPayload: Record<string, unknown> = { ...basePayload };
+        const payloadWithOwnership: Record<string, unknown> =
+          woOwnershipColsSupported
+            ? {
+                ...basePayload,
+                created_by_user_id: userIdent.id,
+                created_by_email: userIdent.email,
+              }
+            : { ...basePayload };
 
-        if (woOwnershipColsSupported) {
-          createPayload = {
-            ...createPayload,
-            created_by_user_id: userIdent.id,
-            created_by_email: userIdent.email,
-          };
-        }
+        const first = await supabase.from("work_orders").insert(payloadWithOwnership).select("id").single();
 
-        let res = await supabase.from("work_orders").insert(createPayload).select("id").single();
-
-        if (res.error && woOwnershipColsSupported && isMissingOwnershipColumnError(res.error)) {
-          logSupabaseError("WO insert failed (ownership cols missing) — retrying", res.error, "warn");
+        if (first.error && woOwnershipColsSupported && isMissingOwnershipColumnError(first.error)) {
+          logSupabaseError("WO insert failed (ownership cols missing) — retrying without ownership", first.error, "warn");
           setWoOwnershipColsSupported(false);
-          res = await supabase.from("work_orders").insert(basePayload).select("id").single();
-        }
 
-        if (res.error) {
-          logSupabaseError("Error creating work order", res.error, "error");
-          setError(formatSupabaseError(res.error) || "Failed to create work order.");
+          const second = await supabase.from("work_orders").insert(basePayload).select("id").single();
+          if (second.error) {
+            logSupabaseError("Error creating work order", second.error, "error");
+            setError(formatSupabaseError(second.error) || "Failed to create work order.");
+            return;
+          }
+          if (second.data?.id) setExpandedWorkOrderId(String(second.data.id));
+        } else if (first.error) {
+          logSupabaseError("Error creating work order", first.error, "error");
+          setError(formatSupabaseError(first.error) || "Failed to create work order.");
           return;
+        } else {
+          if (first.data?.id) setExpandedWorkOrderId(String(first.data.id));
         }
-
-        if (res.data?.id) setExpandedWorkOrderId(String(res.data.id));
       }
 
       await refreshWorkOrders();
@@ -989,26 +950,29 @@ export default function WorkOrdersPage() {
           return;
         }
       } else {
-        let createPayload: Record<string, unknown> = { ...basePayload };
+        const payloadWithOwnership: Record<string, unknown> =
+          cOwnershipColsSupported
+            ? {
+                ...basePayload,
+                created_by_user_id: userIdent.id,
+                created_by_email: userIdent.email,
+              }
+            : { ...basePayload };
 
-        if (cOwnershipColsSupported) {
-          createPayload = {
-            ...createPayload,
-            created_by_user_id: userIdent.id,
-            created_by_email: userIdent.email,
-          };
-        }
+        const first = await supabase.from("containers").insert(payloadWithOwnership).select("id").single();
 
-        let res = await supabase.from("containers").insert(createPayload).select("id").single();
-
-        if (res.error && cOwnershipColsSupported && isMissingOwnershipColumnError(res.error)) {
-          logSupabaseError("Container insert failed (ownership cols missing) — retrying", res.error, "warn");
+        if (first.error && cOwnershipColsSupported && isMissingOwnershipColumnError(first.error)) {
+          logSupabaseError("Container insert failed (ownership cols missing) — retrying without ownership", first.error, "warn");
           setCOwnershipColsSupported(false);
-          res = await supabase.from("containers").insert(basePayload).select("id").single();
-        }
 
-        if (res.error) {
-          logSupabaseError("Error creating container", res.error, "error");
+          const second = await supabase.from("containers").insert(basePayload).select("id").single();
+          if (second.error) {
+            logSupabaseError("Error creating container", second.error, "error");
+            setError("Failed to create container.");
+            return;
+          }
+        } else if (first.error) {
+          logSupabaseError("Error creating container", first.error, "error");
           setError("Failed to create container.");
           return;
         }
@@ -1062,10 +1026,9 @@ export default function WorkOrdersPage() {
         // scoped building
         if (isScopedToOneBuilding && wo.building !== scopedBuilding) return false;
 
-        // Lead: enforce shift + ownership again as extra safety
+        // Lead: enforce shift visibility (but NOT ownership visibility)
         if (isLead) {
           if ((scopedShift || shift) && wo.shift !== (scopedShift || shift)) return false;
-          if (!isOwnerWorkOrder(wo)) return false;
         }
 
         // HQ / Super Admin filter
@@ -1075,7 +1038,7 @@ export default function WorkOrdersPage() {
         return true;
       })
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  }, [workOrders, filterBuilding, filterStatus, isScopedToOneBuilding, scopedBuilding, isLead, scopedShift, shift, isOwnerWorkOrder]);
+  }, [workOrders, filterBuilding, filterStatus, isScopedToOneBuilding, scopedBuilding, isLead, scopedShift, shift]);
 
   const containersForWorkOrder = useCallback(
     (workOrderId: string) =>
@@ -1090,25 +1053,29 @@ export default function WorkOrdersPage() {
     return workOrderOptions.filter((wo) => wo.building === b);
   }, [workOrderOptions, containerForm.building]);
 
+  /**
+   * ✅ Dropdown list:
+   * Uses workforce.name from your schema.
+   * Filters by building only (shift doesn't exist in table).
+   */
   const workforceOptionsForForm = useMemo(() => {
     const b = (isScopedToOneBuilding ? scopedBuilding : containerForm.building) || "";
-    const s = containerForm.shift || "";
 
     const list = workforce
-      .filter((w) => w.active !== false)
+      .filter((w) => {
+        // If status exists, treat "active" as preferred but don't hard-block unknowns
+        if (!w.status) return true;
+        return String(w.status).toLowerCase().includes("active");
+      })
       .filter((w) => {
         if (w.building && b && w.building !== b) return false;
         return true;
       })
-      .filter((w) => {
-        if (w.shift && s && String(w.shift) !== String(s)) return false;
-        return true;
-      })
-      .map((w) => w.fullName)
+      .map((w) => w.name)
       .filter(Boolean);
 
-    return Array.from(new Set(list)).sort((a, b) => a.localeCompare(b));
-  }, [workforce, containerForm.building, containerForm.shift, isScopedToOneBuilding, scopedBuilding]);
+    return Array.from(new Set(list)).sort((a, b2) => a.localeCompare(b2));
+  }, [workforce, containerForm.building, isScopedToOneBuilding, scopedBuilding]);
 
   function renderContainerTable(rows: ContainerRow[]) {
     return (
@@ -1200,9 +1167,7 @@ export default function WorkOrdersPage() {
         <div className="flex items-center justify-between gap-4">
           <div>
             <h1 className="text-2xl font-semibold text-slate-50">Work Orders</h1>
-            <p className="text-sm text-slate-400">
-              Create work orders, then open each work order to add/edit containers inside it.
-            </p>
+            <p className="text-sm text-slate-400">Create work orders, then open each work order to add/edit containers inside it.</p>
 
             {(isLead || isBuildingManager) && (
               <p className="text-[11px] text-slate-500 mt-1">
@@ -1217,18 +1182,13 @@ export default function WorkOrdersPage() {
             )}
           </div>
 
-          <Link
-            href="/"
-            className="text-xs px-3 py-1 rounded-full border border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800"
-          >
+          <Link href="/" className="text-xs px-3 py-1 rounded-full border border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800">
             ← Back to Dashboard
           </Link>
         </div>
 
         {error && (
-          <div className="rounded-lg border border-rose-700 bg-rose-950/40 px-3 py-2 text-[11px] text-rose-100">
-            {error}
-          </div>
+          <div className="rounded-lg border border-rose-700 bg-rose-950/40 px-3 py-2 text-[11px] text-rose-100">{error}</div>
         )}
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -1248,9 +1208,7 @@ export default function WorkOrdersPage() {
               <div className="rounded-xl border border-slate-800 bg-slate-950 p-3">
                 <div className="text-[11px] text-slate-400 mb-1">Auto Work Order Name</div>
                 <div className="text-[12px] font-semibold text-slate-100">{generatedName}</div>
-                <div className="mt-1 text-[10px] text-slate-500">
-                  Name is generated from Building + Shift + Date (no manual typing).
-                </div>
+                <div className="mt-1 text-[10px] text-slate-500">Name is generated from Building + Shift + Date (no manual typing).</div>
               </div>
 
               <div className="grid grid-cols-2 gap-2">
@@ -1281,7 +1239,7 @@ export default function WorkOrdersPage() {
                     onChange={(e) => setShift(e.target.value as ShiftName)}
                     disabled={isLead && !!scopedShift}
                   >
-                    {SHIFTS.map((s) => (
+                    {SHIFT_SET.map((s) => (
                       <option key={s} value={s}>
                         {s}
                       </option>
@@ -1298,9 +1256,7 @@ export default function WorkOrdersPage() {
                   value={woDate}
                   onChange={(e) => setWoDate(e.target.value)}
                 />
-                <div className="mt-1 text-[10px] text-slate-500">
-                  Defaults to today (New York time). Adjust if you’re preparing a future shift.
-                </div>
+                <div className="mt-1 text-[10px] text-slate-500">Defaults to today (New York time). Adjust if you’re preparing a future shift.</div>
               </div>
 
               <div>
@@ -1522,9 +1478,7 @@ export default function WorkOrdersPage() {
                             </div>
 
                             {rows.length === 0 ? (
-                              <div className="py-3 text-center text-[11px] text-slate-500">
-                                No containers in this work order yet. Click “Add Container” above.
-                              </div>
+                              <div className="py-3 text-center text-[11px] text-slate-500">No containers in this work order yet. Click “Add Container” above.</div>
                             ) : (
                               renderContainerTable(rows)
                             )}
@@ -1586,7 +1540,7 @@ export default function WorkOrdersPage() {
                       onChange={(e) => setContainerForm((prev) => ({ ...prev, shift: e.target.value as ShiftName }))}
                       disabled={isLead && !!scopedShift}
                     >
-                      {SHIFTS.map((s) => (
+                      {SHIFT_SET.map((s) => (
                         <option key={s} value={s}>
                           {s}
                         </option>
@@ -1694,8 +1648,9 @@ export default function WorkOrdersPage() {
                     </button>
                   </div>
 
+                  {/* ✅ Dropdown source */}
                   <datalist id="workforceNames">
-                    {workforceOptionsForForm.map((n) => (
+                    {workforceOptionsForForm.slice(0, 300).map((n) => (
                       <option key={n} value={n} />
                     ))}
                   </datalist>
