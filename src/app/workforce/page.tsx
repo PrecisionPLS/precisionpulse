@@ -75,7 +75,6 @@ export default function WorkforcePage() {
   // ✅ Permissions
   const isSuperAdmin = currentUser?.accessRole === "Super Admin";
   const isBuildingManager = currentUser?.accessRole === "Building Manager";
-  const isLead = currentUser?.accessRole === "Lead";
 
   // ✅ You said: ONLY Building Managers should manage workforce
   // I keep Super Admin allowed for safety / admin override.

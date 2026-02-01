@@ -31,14 +31,13 @@ type WorkOrderRecord = {
 type ContainerRecord = {
   id: string;
   workOrderId?: string;
-  [key: string]: any;
+  [key: string]: unknown; // ✅ no "any"
 };
 
 function mapRowToRecord(row: WorkOrderRow): WorkOrderRecord {
   const id = String(row.id);
   const createdAt = row.created_at ?? new Date().toISOString();
-  const name =
-    row.work_order_code ?? row.status + " Work Order " + id.slice(-4);
+  const name = row.work_order_code ?? row.status + " Work Order " + id.slice(-4);
 
   return {
     id,
@@ -49,6 +48,21 @@ function mapRowToRecord(row: WorkOrderRow): WorkOrderRecord {
     createdAt,
     notes: row.notes ?? "",
   };
+}
+
+function displayValue(v: unknown): string {
+  if (v === null || v === undefined) return "—";
+  if (typeof v === "string") return v;
+  if (typeof v === "number" || typeof v === "boolean" || typeof v === "bigint") return String(v);
+  if (v instanceof Date) return v.toISOString();
+  if (typeof v === "object") {
+    try {
+      return JSON.stringify(v);
+    } catch {
+      return "[object]";
+    }
+  }
+  return String(v);
 }
 
 export default function WorkOrderDetailPage() {
@@ -108,13 +122,9 @@ export default function WorkOrderDetailPage() {
           try {
             const raw = window.localStorage.getItem(CONTAINERS_KEY);
             if (raw) {
-              const parsed = JSON.parse(raw);
-              const arr: ContainerRecord[] = Array.isArray(parsed)
-                ? parsed
-                : [];
-              const linked = arr.filter(
-                (c) => c.workOrderId === workOrderId
-              );
+              const parsed: unknown = JSON.parse(raw);
+              const arr: ContainerRecord[] = Array.isArray(parsed) ? (parsed as ContainerRecord[]) : [];
+              const linked = arr.filter((c) => c?.workOrderId === workOrderId);
               setContainers(linked);
             } else {
               setContainers([]);
@@ -140,10 +150,7 @@ export default function WorkOrderDetailPage() {
     return (
       <div className="min-h-screen bg-slate-950 text-slate-400 flex flex-col items-center justify-center text-sm gap-2">
         <div>Redirecting to login…</div>
-        <a
-          href="/auth"
-          className="text-sky-400 text-xs underline hover:text-sky-300"
-        >
+        <a href="/auth" className="text-sky-400 text-xs underline hover:text-sky-300">
           Click here if you are not redirected.
         </a>
       </div>
@@ -155,9 +162,7 @@ export default function WorkOrderDetailPage() {
       <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-950 to-slate-900 text-slate-50">
         <div className="mx-auto max-w-5xl p-6 space-y-4">
           <div className="flex items-center justify-between">
-            <h1 className="text-2xl font-semibold text-slate-50">
-              Work Order
-            </h1>
+            <h1 className="text-2xl font-semibold text-slate-50">Work Order</h1>
             <Link
               href="/work-orders"
               className="text-xs px-3 py-1 rounded-full border border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800"
@@ -178,9 +183,7 @@ export default function WorkOrderDetailPage() {
       <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-950 to-slate-900 text-slate-50">
         <div className="mx-auto max-w-5xl p-6 space-y-4">
           <div className="flex items-center justify-between">
-            <h1 className="text-2xl font-semibold text-slate-50">
-              Work Order
-            </h1>
+            <h1 className="text-2xl font-semibold text-slate-50">Work Order</h1>
             <Link
               href="/work-orders"
               className="text-xs px-3 py-1 rounded-full border border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800"
@@ -202,9 +205,7 @@ export default function WorkOrderDetailPage() {
         {/* Header */}
         <div className="flex items-center justify-between gap-4">
           <div>
-            <h1 className="text-2xl font-semibold text-slate-50">
-              {workOrder.name}
-            </h1>
+            <h1 className="text-2xl font-semibold text-slate-50">{workOrder.name}</h1>
             <p className="text-sm text-slate-400">
               Building {workOrder.building} · {workOrder.shift} shift ·{" "}
               <span
@@ -222,9 +223,7 @@ export default function WorkOrderDetailPage() {
                 {workOrder.status}
               </span>
             </p>
-            <p className="text-xs text-slate-500 mt-1">
-              Created on {dateShort}
-            </p>
+            <p className="text-xs text-slate-500 mt-1">Created on {dateShort}</p>
           </div>
           <div className="flex flex-col items-end gap-2 text-xs">
             <Link
@@ -235,9 +234,7 @@ export default function WorkOrderDetailPage() {
             </Link>
             <div className="text-[11px] text-slate-400">
               Total containers linked:{" "}
-              <span className="font-semibold text-slate-100">
-                {containers.length}
-              </span>
+              <span className="font-semibold text-slate-100">{containers.length}</span>
             </div>
           </div>
         </div>
@@ -245,12 +242,8 @@ export default function WorkOrderDetailPage() {
         {/* Notes card */}
         {workOrder.notes && (
           <div className="rounded-2xl bg-slate-900 border border-slate-800 p-4 text-xs">
-            <div className="text-[11px] text-slate-400 mb-1">
-              Work Order Notes
-            </div>
-            <div className="text-slate-200 whitespace-pre-wrap">
-              {workOrder.notes}
-            </div>
+            <div className="text-[11px] text-slate-400 mb-1">Work Order Notes</div>
+            <div className="text-slate-200 whitespace-pre-wrap">{workOrder.notes}</div>
           </div>
         )}
 
@@ -258,59 +251,37 @@ export default function WorkOrderDetailPage() {
         <div className="rounded-2xl bg-slate-900 border border-slate-800 p-4 text-xs space-y-3">
           <div className="flex items-center justify-between mb-1">
             <div>
-              <div className="text-slate-200 text-sm font-semibold">
-                Containers for this Work Order
-              </div>
+              <div className="text-slate-200 text-sm font-semibold">Containers for this Work Order</div>
               <div className="text-[11px] text-slate-500">
-                Showing all containers linked with this work order in your
-                browser.
+                Showing all containers linked with this work order in your browser.
               </div>
             </div>
             <div className="text-[11px] text-slate-400">
-              Total:{" "}
-              <span className="font-semibold text-slate-100">
-                {containers.length}
-              </span>
+              Total: <span className="font-semibold text-slate-100">{containers.length}</span>
             </div>
           </div>
 
           {containers.length === 0 ? (
-            <p className="text-[11px] text-slate-400">
-              No containers are linked to this work order yet.
-            </p>
+            <p className="text-[11px] text-slate-400">No containers are linked to this work order yet.</p>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               {containers.map((c) => {
-                const entries = Object.entries(c).filter(
-                  ([key]) => key !== "id" && key !== "workOrderId"
-                );
+                const entries = Object.entries(c).filter(([key]) => key !== "id" && key !== "workOrderId");
 
                 return (
-                  <div
-                    key={c.id}
-                    className="rounded-lg border border-slate-800 bg-slate-950 p-3 space-y-1"
-                  >
+                  <div key={c.id} className="rounded-lg border border-slate-800 bg-slate-950 p-3 space-y-1">
                     <div className="text-[10px] text-slate-500 mb-1">
-                      Container ID:{" "}
-                      <span className="font-mono text-slate-200">
-                        {c.id}
-                      </span>
+                      Container ID: <span className="font-mono text-slate-200">{c.id}</span>
                     </div>
+
                     {entries.length === 0 ? (
-                      <div className="text-[10px] text-slate-500">
-                        (No additional fields on this container record.)
-                      </div>
+                      <div className="text-[10px] text-slate-500">(No additional fields on this container record.)</div>
                     ) : (
                       entries.slice(0, 10).map(([key, value]) => (
-                        <div
-                          key={key}
-                          className="flex justify-between gap-2"
-                        >
-                          <span className="text-[10px] text-slate-400">
-                            {key}
-                          </span>
+                        <div key={key} className="flex justify-between gap-2">
+                          <span className="text-[10px] text-slate-400">{key}</span>
                           <span className="text-[10px] text-slate-200 max-w-[12rem] truncate text-right">
-                            {String(value)}
+                            {displayValue(value)}
                           </span>
                         </div>
                       ))

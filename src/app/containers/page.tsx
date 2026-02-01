@@ -70,8 +70,40 @@ function calculateContainerPay(pieces: number, palletized: boolean): number {
   return 280 + extra * 0.05;
 }
 
+/**
+ * ✅ NEW YORK TIME HELPERS (fixes the "tomorrow" bug from UTC toISOString)
+ * We compute YYYY-MM-DD based on America/New_York.
+ */
+function nyISODate(d: Date = new Date()): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(d);
+
+  const y = parts.find((p) => p.type === "year")?.value ?? "1970";
+  const m = parts.find((p) => p.type === "month")?.value ?? "01";
+  const day = parts.find((p) => p.type === "day")?.value ?? "01";
+  return `${y}-${m}-${day}`;
+}
+
 function todayISODate() {
-  return new Date().toISOString().slice(0, 10);
+  return nyISODate();
+}
+
+/**
+ * Display helper for date cells:
+ * - Prefer work_date (already YYYY-MM-DD)
+ * - Fallback to created_at interpreted in NY time
+ */
+function formatDateCellNY(work_date: string | null, created_at: string): string {
+  if (work_date && String(work_date).length >= 10) return String(work_date).slice(0, 10);
+
+  // created_at is often ISO with Z; format it in NY time
+  const d = new Date(created_at);
+  if (Number.isNaN(d.getTime())) return String(created_at).slice(0, 10);
+  return nyISODate(d);
 }
 
 function blankWorker(): WorkerContribution {
@@ -168,7 +200,7 @@ export default function ContainersPage() {
   const [formState, setFormState] = useState<EditFormState>(() => ({
     building: currentUser?.building || BUILDINGS[0] || "DC18",
     shift: "1st",
-    workDate: todayISODate(),
+    workDate: todayISODate(), // ✅ NY time
     containerNo: "",
     piecesTotal: 0,
     skusTotal: 0,
@@ -286,7 +318,7 @@ export default function ContainersPage() {
     setFormState({
       building: currentUser?.building || BUILDINGS[0] || "DC18",
       shift: "1st",
-      workDate: todayISODate(),
+      workDate: todayISODate(), // ✅ NY time
       containerNo: "",
       piecesTotal: 0,
       skusTotal: 0,
@@ -306,7 +338,7 @@ export default function ContainersPage() {
       id: row.id,
       building: row.building,
       shift: ((row.shift as ShiftName) || "1st") as ShiftName,
-      workDate: row.work_date ? String(row.work_date).slice(0, 10) : todayISODate(),
+      workDate: row.work_date ? String(row.work_date).slice(0, 10) : nyISODate(new Date(row.created_at)),
       containerNo: row.container_no,
       piecesTotal: row.pieces_total,
       skusTotal: row.skus_total,
@@ -590,7 +622,7 @@ export default function ContainersPage() {
               {containers.map((c) => (
                 <tr key={c.id} className="border-b border-slate-800/60 hover:bg-slate-900/70">
                   <td className="py-2 pr-3 text-[11px] text-slate-400">
-                    {c.work_date ? String(c.work_date).slice(0, 10) : String(c.created_at).slice(0, 10)}
+                    {formatDateCellNY(c.work_date, c.created_at)}
                   </td>
                   <td className="py-2 pr-3 text-[11px] text-slate-200">{c.building}</td>
                   <td className="py-2 pr-3 text-[11px] text-slate-200">{c.shift ?? "—"}</td>

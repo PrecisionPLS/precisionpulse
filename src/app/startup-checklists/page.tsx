@@ -4,21 +4,107 @@ import Link from "next/link";
 import { useEffect, useMemo, useState, FormEvent } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { useCurrentUser } from "@/lib/useCurrentUser";
-import { BUILDINGS } from "@/lib/buildings"; // ✅ shared buildings
+import { BUILDINGS } from "@/lib/buildings";
 
-const STARTUP_STORAGE_KEY = "precisionpulse_startup_checklists";
+const SHIFTS = ["1st", "2nd", "3rd", "4th"] as const;
 
-const SHIFTS = ["1st", "2nd", "3rd", "4th"];
+type AccessRole = "Super Admin" | "Building Manager" | "Lead" | string;
+type ReportStatus = "Draft" | "In Progress" | "Ready" | "Completed";
 
-type ChecklistStatus = "In Progress" | "Completed";
+// Keep this minimal and compatible with your existing useCurrentUser output.
+// If your hook has more fields, that’s fine.
+type CurrentUser = {
+  id?: string;
+  userId?: string;
+  uid?: string;
+  email?: string;
+  name?: string;
+  fullName?: string;
+  displayName?: string;
+  accessRole?: AccessRole;
+  building?: string;
+  shift?: string;
+} | null;
 
-type ChecklistItems = {
-  staffingConfirmed: boolean;
-  safetyTalkCompleted: boolean;
-  equipmentChecked: boolean;
-  dockAislesClear: boolean;
-  goalsReviewed: boolean;
-  whatsappBroadcastSent: boolean;
+type ReadinessMeta = {
+  createdByUserId?: string;
+  createdByName?: string;
+  createdByRole?: string;
+  updatedByUserId?: string;
+  updatedByName?: string;
+  updatedByRole?: string;
+  updatedAtISO?: string;
+};
+
+type ReadinessItems = {
+  _meta?: ReadinessMeta;
+
+  shiftDetails?: {
+    scheduledStartTime?: string; // "06:00"
+    headcountTarget?: number | null;
+    expectedContainers?: number | null;
+    notes?: string;
+  };
+
+  staffing?: {
+    allArrived?: boolean;
+    staffingAdequate?: boolean;
+    keyRolesCovered?: boolean;
+    lateOrNoShowDetails?: string;
+    staffingPlanNotes?: string;
+  };
+
+  safety?: {
+    safetyTalkCompleted?: boolean;
+    safetyTopic?: string;
+    stretchingCompleted?: boolean;
+    ppeCheckCompleted?: boolean;
+    hazardsIdentified?: boolean;
+    hazardsDetails?: string;
+    incidentsReviewed?: boolean;
+    nearMissReported?: boolean;
+    nearMissDetails?: string;
+  };
+
+  facility?: {
+    dockAislesClear?: boolean;
+    stagingAreaReady?: boolean;
+    doorsAssigned?: boolean;
+    sanitationAcceptable?: boolean;
+    facilityIssues?: boolean;
+    facilityIssuesDetails?: string;
+  };
+
+  equipment?: {
+    equipmentChecked?: boolean;
+    forkliftsReady?: boolean;
+    scannersRadiosReady?: boolean;
+    wrapSuppliesReady?: boolean;
+    equipmentDown?: boolean;
+    equipmentDownDetails?: string;
+  };
+
+  plan?: {
+    goalsReviewed?: boolean;
+    priorityNotes?: string;
+    assignmentsSet?: boolean;
+    riskIdentified?: boolean;
+    riskDetails?: string;
+  };
+
+  communication?: {
+    whatsappBroadcastSent?: boolean;
+    broadcastSummary?: string;
+    leadershipNotifiedIfIssues?: boolean;
+    dailyFocusMessage?: string;
+  };
+
+  confirmation?: {
+    readyToStart?: boolean;
+    shiftStartedAtISO?: string;
+    completedAtISO?: string;
+    finalNotes?: string;
+  };
 };
 
 type StartupChecklist = {
@@ -28,7 +114,7 @@ type StartupChecklist = {
   date: string; // YYYY-MM-DD
   createdAt: string; // ISO
   completedAt?: string; // ISO
-  items: ChecklistItems;
+  items: ReadinessItems;
 };
 
 type StartupRow = {
@@ -38,89 +124,260 @@ type StartupRow = {
   building: string | null;
   shift: string | null;
   date: string | null;
-  items: any;
+  items: unknown; // ✅ no any
 };
 
-function getProgress(rec: StartupChecklist) {
-  const values = Object.values(rec.items);
-  const total = values.length;
-  const done = values.filter(Boolean).length;
-  const percent = total === 0 ? 0 : Math.round((done / total) * 100);
-  return { total, done, percent };
+// --------------------
+// Helpers
+// --------------------
+
+function safeString(v: unknown): string {
+  return typeof v === "string" ? v : "";
 }
 
-function getStatus(rec: StartupChecklist): ChecklistStatus {
-  const { total, done } = getProgress(rec);
-  return done === total && total > 0 ? "Completed" : "In Progress";
+function safeBool(v: unknown): boolean {
+  return typeof v === "boolean" ? v : false;
 }
 
-function defaultItems(): ChecklistItems {
+function isoNow(): string {
+  return new Date().toISOString();
+}
+
+function formatISODate(iso?: string): string {
+  if (!iso) return "—";
+  return iso.slice(0, 10);
+}
+
+function defaultItems(): ReadinessItems {
   return {
-    staffingConfirmed: false,
-    safetyTalkCompleted: false,
-    equipmentChecked: false,
-    dockAislesClear: false,
-    goalsReviewed: false,
-    whatsappBroadcastSent: false,
+    _meta: {},
+    shiftDetails: {
+      scheduledStartTime: "",
+      headcountTarget: null,
+      expectedContainers: null,
+      notes: "",
+    },
+    staffing: {
+      allArrived: false,
+      staffingAdequate: false,
+      keyRolesCovered: false,
+      lateOrNoShowDetails: "",
+      staffingPlanNotes: "",
+    },
+    safety: {
+      safetyTalkCompleted: false,
+      safetyTopic: "",
+      stretchingCompleted: false,
+      ppeCheckCompleted: false,
+      hazardsIdentified: false,
+      hazardsDetails: "",
+      incidentsReviewed: false,
+      nearMissReported: false,
+      nearMissDetails: "",
+    },
+    facility: {
+      dockAislesClear: false,
+      stagingAreaReady: false,
+      doorsAssigned: false,
+      sanitationAcceptable: false,
+      facilityIssues: false,
+      facilityIssuesDetails: "",
+    },
+    equipment: {
+      equipmentChecked: false,
+      forkliftsReady: false,
+      scannersRadiosReady: false,
+      wrapSuppliesReady: false,
+      equipmentDown: false,
+      equipmentDownDetails: "",
+    },
+    plan: {
+      goalsReviewed: false,
+      priorityNotes: "",
+      assignmentsSet: false,
+      riskIdentified: false,
+      riskDetails: "",
+    },
+    communication: {
+      whatsappBroadcastSent: false,
+      broadcastSummary: "",
+      leadershipNotifiedIfIssues: false,
+      dailyFocusMessage: "",
+    },
+    confirmation: {
+      readyToStart: false,
+      shiftStartedAtISO: "",
+      completedAtISO: "",
+      finalNotes: "",
+    },
   };
+}
+
+function isRecordLike(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function mergeItems(existing: unknown): ReadinessItems {
+  const base = defaultItems();
+  if (!isRecordLike(existing)) return base;
+
+  const e = existing as Record<string, unknown>;
+
+  // section-by-section safe merge
+  const merged: ReadinessItems = {
+    ...base,
+    ...e,
+    _meta: { ...(base._meta || {}), ...(isRecordLike(e._meta) ? (e._meta as ReadinessMeta) : {}) },
+    shiftDetails: { ...(base.shiftDetails || {}), ...(isRecordLike(e.shiftDetails) ? (e.shiftDetails as ReadinessItems["shiftDetails"]) : {}) },
+    staffing: { ...(base.staffing || {}), ...(isRecordLike(e.staffing) ? (e.staffing as ReadinessItems["staffing"]) : {}) },
+    safety: { ...(base.safety || {}), ...(isRecordLike(e.safety) ? (e.safety as ReadinessItems["safety"]) : {}) },
+    facility: { ...(base.facility || {}), ...(isRecordLike(e.facility) ? (e.facility as ReadinessItems["facility"]) : {}) },
+    equipment: { ...(base.equipment || {}), ...(isRecordLike(e.equipment) ? (e.equipment as ReadinessItems["equipment"]) : {}) },
+    plan: { ...(base.plan || {}), ...(isRecordLike(e.plan) ? (e.plan as ReadinessItems["plan"]) : {}) },
+    communication: { ...(base.communication || {}), ...(isRecordLike(e.communication) ? (e.communication as ReadinessItems["communication"]) : {}) },
+    confirmation: { ...(base.confirmation || {}), ...(isRecordLike(e.confirmation) ? (e.confirmation as ReadinessItems["confirmation"]) : {}) },
+  };
+
+  return merged;
 }
 
 function rowToStartup(row: StartupRow): StartupChecklist {
-  let items: ChecklistItems = defaultItems();
-  if (row.items && typeof row.items === "object") {
-    items = {
-      ...defaultItems(),
-      ...(row.items as Partial<ChecklistItems>),
-    };
-  }
-
   return {
     id: String(row.id),
-    building: row.building ?? "DC18",
-    shift: row.shift ?? "1st",
+    building: row.building ?? BUILDINGS[0],
+    shift: row.shift ?? SHIFTS[0],
     date: row.date ?? new Date().toISOString().slice(0, 10),
-    createdAt: row.created_at ?? new Date().toISOString(),
+    createdAt: row.created_at ?? isoNow(),
     completedAt: row.completed_at ?? undefined,
-    items,
+    items: mergeItems(row.items),
   };
 }
 
-export default function StartupChecklistsPage() {
-  const currentUser = useCurrentUser();
-  const isSuperAdmin = currentUser?.accessRole === "Super Admin";
-  const isLead = currentUser?.accessRole === "Lead";
-  const leadBuilding = currentUser?.building || "";
+function computeStatus(rec: StartupChecklist) {
+  const req: boolean[] = [
+    safeBool(rec.items.staffing?.allArrived),
+    safeBool(rec.items.staffing?.staffingAdequate),
+    safeBool(rec.items.safety?.safetyTalkCompleted),
+    safeBool(rec.items.safety?.stretchingCompleted),
+    safeBool(rec.items.safety?.ppeCheckCompleted),
+    safeBool(rec.items.facility?.dockAislesClear),
+    safeBool(rec.items.equipment?.equipmentChecked),
+    safeBool(rec.items.plan?.goalsReviewed),
+    safeBool(rec.items.communication?.whatsappBroadcastSent),
+    safeBool(rec.items.confirmation?.readyToStart),
+  ];
+
+  const total = req.length;
+  const done = req.filter(Boolean).length;
+  const percent = total === 0 ? 0 : Math.round((done / total) * 100);
+
+  const completedISO = safeString(rec.items.confirmation?.completedAtISO).trim();
+  if (completedISO) return { status: "Completed" as const, percent: 100, done: total, total };
+
+  const hasAny =
+    done > 0 ||
+    safeString(rec.items.communication?.dailyFocusMessage).trim().length > 0 ||
+    safeString(rec.items.staffing?.lateOrNoShowDetails).trim().length > 0 ||
+    safeString(rec.items.plan?.priorityNotes).trim().length > 0;
+
+  if (!hasAny) return { status: "Draft" as const, percent, done, total };
+  if (done === total) return { status: "Ready" as const, percent: 100, done, total };
+  return { status: "In Progress" as const, percent, done, total };
+}
+
+function pillClass(status: ReportStatus) {
+  if (status === "Completed")
+    return "inline-flex items-center px-2 py-0.5 rounded-full bg-emerald-900/60 text-emerald-200 border border-emerald-700 text-[11px]";
+  if (status === "Ready")
+    return "inline-flex items-center px-2 py-0.5 rounded-full bg-sky-900/60 text-sky-200 border border-sky-700 text-[11px]";
+  if (status === "In Progress")
+    return "inline-flex items-center px-2 py-0.5 rounded-full bg-amber-900/60 text-amber-200 border border-amber-700 text-[11px]";
+  return "inline-flex items-center px-2 py-0.5 rounded-full bg-slate-900/60 text-slate-200 border border-slate-700 text-[11px]";
+}
+
+// --------------------
+// Page
+// --------------------
+
+export default function ShiftReadinessReportsPage() {
+  const currentUser = useCurrentUser() as CurrentUser;
+
+  const role: AccessRole = currentUser?.accessRole ?? "";
+  const isSuperAdmin = role === "Super Admin";
+  const isBuildingManager = role === "Building Manager";
+  const isLead = role === "Lead";
+
+  const userId = safeString(currentUser?.id || currentUser?.userId || currentUser?.uid);
+  const userName = safeString(currentUser?.name || currentUser?.fullName || currentUser?.displayName || currentUser?.email);
+  const userBuilding = safeString(currentUser?.building);
+  const userShift = safeString(currentUser?.shift);
 
   const [records, setRecords] = useState<StartupChecklist[]>([]);
-
-  // ✅ NEW: track which checklist is being edited
   const [editingId, setEditingId] = useState<string | null>(null);
 
-  // Form state
+  // Create/edit header state
   const [building, setBuilding] = useState<string>(BUILDINGS[0]);
-  const [shift, setShift] = useState(SHIFTS[0]);
-  const [date, setDate] = useState<string>(() => {
-    const today = new Date();
-    return today.toISOString().slice(0, 10);
-  });
+  const [shift, setShift] = useState<string>(SHIFTS[0]);
+  const [date, setDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
 
   // Filters
   const [filterBuilding, setFilterBuilding] = useState<string>("ALL");
   const [filterShift, setFilterShift] = useState<string>("ALL");
-  const [filterStatus, setFilterStatus] =
-    useState<ChecklistStatus | "ALL">("ALL");
+  const [filterStatus, setFilterStatus] = useState<ReportStatus | "ALL">("ALL");
 
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
-  function persist(next: StartupChecklist[]) {
-    setRecords(next);
-    if (typeof window !== "undefined") {
-      window.localStorage.setItem(STARTUP_STORAGE_KEY, JSON.stringify(next));
+  // --------------------
+  // Permissions
+  // --------------------
+
+  function canViewRecord(r: StartupChecklist): boolean {
+    if (isSuperAdmin) return true;
+
+    if (isBuildingManager) {
+      return !!userBuilding && r.building === userBuilding;
     }
+
+    if (isLead) {
+      const creatorId = safeString(r.items._meta?.createdByUserId);
+      return (
+        !!userBuilding &&
+        !!userShift &&
+        r.building === userBuilding &&
+        r.shift === userShift &&
+        !!creatorId &&
+        creatorId === userId
+      );
+    }
+
+    return false;
   }
+
+  function canEditRecord(r: StartupChecklist): boolean {
+    if (isSuperAdmin) return true;
+    if (isBuildingManager) return !!userBuilding && r.building === userBuilding;
+    if (isLead) return safeString(r.items._meta?.createdByUserId) === userId;
+    return false;
+  }
+
+  function canDeleteRecord(): boolean {
+    return isSuperAdmin; // ✅ only super admins delete
+  }
+
+  function lockBuildingOnCreate(): boolean {
+    return (isLead || isBuildingManager) && !!userBuilding;
+  }
+
+  function lockShiftOnCreate(): boolean {
+    return isLead && !!userShift;
+  }
+
+  // --------------------
+  // Load
+  // --------------------
 
   async function refreshFromSupabase() {
     if (!currentUser) return;
@@ -129,30 +386,28 @@ export default function StartupChecklistsPage() {
     setError(null);
 
     try {
-      let query = supabase
-        .from("startup_checklists")
-        .select("*")
-        .order("created_at", { ascending: false });
+      let query = supabase.from("startup_checklists").select("*").order("created_at", { ascending: false });
 
-      // If this user is a Lead, only show startup checklists for their building
-      if (isLead && leadBuilding) {
-        query = query.eq("building", leadBuilding);
+      // narrowing query (RLS still required)
+      if (isLead) {
+        if (userBuilding) query = query.eq("building", userBuilding);
+        if (userShift) query = query.eq("shift", userShift);
+      } else if (isBuildingManager) {
+        if (userBuilding) query = query.eq("building", userBuilding);
       }
 
-      const { data, error } = await query;
-
-      if (error) {
-        console.error("Error loading startup checklists", error);
-        setError("Failed to load startup checklists from server.");
+      const { data, error: loadError } = await query;
+      if (loadError) {
+        console.error(loadError);
+        setError("Failed to load shift readiness reports from server.");
         return;
       }
 
-      const rows = (data || []) as StartupRow[];
-      const mapped = rows.map(rowToStartup);
-      persist(mapped);
+      const mapped = ((data ?? []) as StartupRow[]).map(rowToStartup);
+      setRecords(mapped.filter(canViewRecord));
     } catch (e) {
-      console.error("Unexpected error loading startup checklists", e);
-      setError("Unexpected error loading startup checklists.");
+      console.error(e);
+      setError("Unexpected error loading shift readiness reports.");
     } finally {
       setLoading(false);
     }
@@ -161,85 +416,68 @@ export default function StartupChecklistsPage() {
   useEffect(() => {
     if (!currentUser) return;
     refreshFromSupabase();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentUser]);
 
-  // Once user + role known, lock building + filters for Leads
   useEffect(() => {
     if (!currentUser) return;
-    if (isLead && leadBuilding) {
-      setBuilding((prev) => prev || leadBuilding);
-      setFilterBuilding(leadBuilding);
+
+    if ((isLead || isBuildingManager) && userBuilding) {
+      setBuilding(userBuilding);
+      setFilterBuilding(userBuilding);
     }
-  }, [currentUser, isLead, leadBuilding]);
+    if (isLead && userShift) {
+      setShift(userShift);
+      setFilterShift(userShift);
+    }
+  }, [currentUser, isLead, isBuildingManager, userBuilding, userShift]);
+
+  // --------------------
+  // Summary / filter
+  // --------------------
 
   const summary = useMemo(() => {
     const total = records.length;
-    const completed = records.filter(
-      (r) => getStatus(r) === "Completed"
-    ).length;
-    const inProgress = total - completed;
+    const completed = records.filter((r) => computeStatus(r).status === "Completed").length;
+    const ready = records.filter((r) => computeStatus(r).status === "Ready").length;
+    const inProgress = records.filter((r) => computeStatus(r).status === "In Progress").length;
+    const draft = records.filter((r) => computeStatus(r).status === "Draft").length;
 
     const todayStr = new Date().toISOString().slice(0, 10);
     const todayRecords = records.filter((r) => r.date === todayStr);
-    const todayTotal = todayRecords.length;
-    const todayCompleted = todayRecords.filter(
-      (r) => getStatus(r) === "Completed"
-    ).length;
+    const todayReady = todayRecords.filter((r) => ["Ready", "Completed"].includes(computeStatus(r).status)).length;
 
-    return { total, completed, inProgress, todayTotal, todayCompleted };
-  }, [records]);
-
-  const buildingStats = useMemo(() => {
-    const result: Record<string, { total: number; completed: number }> = {};
-    for (const b of BUILDINGS) {
-      result[b] = { total: 0, completed: 0 };
-    }
-    for (const r of records) {
-      const b = r.building;
-      if (!result[b]) {
-        result[b] = { total: 0, completed: 0 };
-      }
-      result[b].total++;
-      if (getStatus(r) === "Completed") result[b].completed++;
-    }
-    return result;
+    return { total, completed, ready, inProgress, draft, todayReady };
   }, [records]);
 
   const filteredRecords = useMemo(() => {
     return records.filter((r) => {
-      if (filterBuilding !== "ALL" && r.building !== filterBuilding) {
-        return false;
-      }
-      if (filterShift !== "ALL" && r.shift !== filterShift) {
-        return false;
-      }
-      if (filterStatus !== "ALL" && getStatus(r) !== filterStatus) {
-        return false;
-      }
+      if (filterBuilding !== "ALL" && r.building !== filterBuilding) return false;
+      if (filterShift !== "ALL" && r.shift !== filterShift) return false;
+      if (filterStatus !== "ALL" && computeStatus(r).status !== filterStatus) return false;
       return true;
     });
   }, [records, filterBuilding, filterShift, filterStatus]);
 
-  // ✅ Reset form & exit edit mode
+  // --------------------
+  // Header form
+  // --------------------
+
   function resetForm() {
     setEditingId(null);
     setError(null);
     setInfo(null);
+    setDate(new Date().toISOString().slice(0, 10));
 
-    const today = new Date().toISOString().slice(0, 10);
+    if ((isLead || isBuildingManager) && userBuilding) setBuilding(userBuilding);
+    else setBuilding(BUILDINGS[0]);
 
-    setDate(today);
-    setShift(SHIFTS[0]);
-
-    if (isLead && leadBuilding) {
-      setBuilding(leadBuilding);
-    } else {
-      setBuilding(BUILDINGS[0]);
-    }
+    if (isLead && userShift) setShift(userShift);
+    else setShift(SHIFTS[0]);
   }
 
-  // ✅ Start editing an existing checklist
   function startEdit(rec: StartupChecklist) {
+    if (!canEditRecord(rec)) return;
     setEditingId(rec.id);
     setBuilding(rec.building);
     setShift(rec.shift);
@@ -248,7 +486,6 @@ export default function StartupChecklistsPage() {
     setInfo(null);
   }
 
-  // ✅ Create OR update checklist
   async function handleSave(e: FormEvent) {
     e.preventDefault();
     if (saving) return;
@@ -261,18 +498,11 @@ export default function StartupChecklistsPage() {
       return;
     }
 
-    // only one per building/shift/date (client-side check)
     const existing = records.find(
-      (r) =>
-        r.building === building &&
-        r.shift === shift &&
-        r.date === date &&
-        r.id !== editingId // allow current record to keep same combo
+      (r) => r.building === building && r.shift === shift && r.date === date && r.id !== editingId
     );
     if (existing) {
-      setError(
-        "A startup checklist already exists for this building, shift, and date."
-      );
+      setError("A report already exists for this building, shift, and date.");
       return;
     }
 
@@ -280,61 +510,106 @@ export default function StartupChecklistsPage() {
 
     try {
       if (editingId) {
-        // 🔄 UPDATE existing checklist (do not touch items)
-        const { error } = await supabase
+        // Only Super Admin / Building Manager can edit header details
+        if (!(isSuperAdmin || isBuildingManager)) {
+          setInfo("Header details are locked for your role. Edit inside the report sections below.");
+          return;
+        }
+
+        const { error: updateError } = await supabase
           .from("startup_checklists")
-          .update({
-            building,
-            shift,
-            date,
-          })
+          .update({ building, shift, date })
           .eq("id", editingId);
 
-        if (error) {
-          console.error("Error updating startup checklist", error);
-          setError("Failed to update startup checklist.");
+        if (updateError) {
+          console.error(updateError);
+          setError("Failed to update report.");
           return;
         }
 
         await refreshFromSupabase();
-        setInfo("Startup checklist updated.");
+        setInfo("Report updated.");
       } else {
-        // ➕ CREATE new checklist
-        const payload = {
-          building,
-          shift,
-          date,
-          items: defaultItems(),
+        const base = defaultItems();
+        base._meta = {
+          createdByUserId: userId,
+          createdByName: userName,
+          createdByRole: role,
+          updatedByUserId: userId,
+          updatedByName: userName,
+          updatedByRole: role,
+          updatedAtISO: isoNow(),
         };
 
-        const { error } = await supabase
-          .from("startup_checklists")
-          .insert(payload);
+        const finalBuilding = lockBuildingOnCreate() ? userBuilding : building;
+        const finalShift = lockShiftOnCreate() ? userShift : shift;
 
-        if (error) {
-          console.error("Error inserting startup checklist", error);
-          setError("Failed to create startup checklist.");
+        const payload = {
+          building: finalBuilding || BUILDINGS[0],
+          shift: finalShift || SHIFTS[0],
+          date,
+          items: base,
+          completed_at: null,
+        };
+
+        const { error: insertError } = await supabase.from("startup_checklists").insert(payload);
+        if (insertError) {
+          console.error(insertError);
+          setError("Failed to create report.");
           return;
         }
 
         await refreshFromSupabase();
-        setInfo("Startup checklist created. Use the list below to complete steps.");
+        setInfo("Report created. Complete required sections before shift start.");
       }
     } catch (e) {
-      console.error("Unexpected error saving checklist", e);
-      setError("Unexpected error saving checklist.");
+      console.error(e);
+      setError("Unexpected error saving report.");
     } finally {
       setSaving(false);
     }
   }
 
-  // ✅ Delete a checklist
-  async function handleDelete(id: string) {
-    if (typeof window !== "undefined") {
-      const ok = window.confirm(
-        "Delete this startup checklist? This cannot be undone."
-      );
-      if (!ok) return;
+  async function handleDelete(rec: StartupChecklist) {
+    if (!canDeleteRecord()) {
+      setError("You do not have permission to delete reports.");
+      return;
+    }
+
+    const ok = typeof window !== "undefined" ? window.confirm("Delete this report? This cannot be undone.") : false;
+    if (!ok) return;
+
+    setSaving(true);
+    setError(null);
+    setInfo(null);
+
+    try {
+      const { error: deleteError } = await supabase.from("startup_checklists").delete().eq("id", rec.id);
+      if (deleteError) {
+        console.error(deleteError);
+        setError("Failed to delete report.");
+        return;
+      }
+
+      await refreshFromSupabase();
+      if (editingId === rec.id) resetForm();
+      setInfo("Report deleted.");
+    } catch (e) {
+      console.error(e);
+      setError("Unexpected error deleting report.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // --------------------
+  // Save items (typed)
+  // --------------------
+
+  async function saveItems(rec: StartupChecklist, nextItems: ReadinessItems) {
+    if (!canEditRecord(rec)) {
+      setError("You do not have permission to edit this report.");
+      return;
     }
 
     setSaving(true);
@@ -342,94 +617,106 @@ export default function StartupChecklistsPage() {
     setInfo(null);
 
     try {
-      const { error } = await supabase
+      nextItems._meta = {
+        ...(nextItems._meta || {}),
+        updatedByUserId: userId,
+        updatedByName: userName,
+        updatedByRole: role,
+        updatedAtISO: isoNow(),
+      };
+
+      const completedISO = safeString(nextItems.confirmation?.completedAtISO).trim();
+      const legacyCompletedAt = completedISO ? completedISO : null;
+
+      const { error: itemError } = await supabase
         .from("startup_checklists")
-        .delete()
-        .eq("id", id);
+        .update({ items: nextItems, completed_at: legacyCompletedAt })
+        .eq("id", rec.id);
 
-      if (error) {
-        console.error("Error deleting startup checklist", error);
-        setError("Failed to delete startup checklist.");
-        return;
-      }
-
-      await refreshFromSupabase();
-
-      if (editingId === id) {
-        resetForm();
-      }
-
-      setInfo("Startup checklist deleted.");
-    } catch (e) {
-      console.error("Unexpected error deleting checklist", e);
-      setError("Unexpected error deleting checklist.");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function toggleItem(id: string, field: keyof ChecklistItems) {
-    setError(null);
-    setInfo(null);
-
-    const target = records.find((r) => r.id === id);
-    if (!target) return;
-
-    const newItems: ChecklistItems = {
-      ...target.items,
-      [field]: !target.items[field],
-    };
-
-    // compute new completion status + completedAt timestamp
-    const temp: StartupChecklist = {
-      ...target,
-      items: newItems,
-    };
-    const status = getStatus(temp);
-    const now = new Date().toISOString();
-    const newCompletedAt = status === "Completed" ? now : undefined;
-
-    setSaving(true);
-    try {
-      const { error } = await supabase
-        .from("startup_checklists")
-        .update({
-          items: newItems,
-          completed_at: newCompletedAt ?? null,
-        })
-        .eq("id", id);
-
-      if (error) {
-        console.error("Error updating startup checklist", error);
-        setError("Failed to update checklist item.");
+      if (itemError) {
+        console.error(itemError);
+        setError("Failed to update report.");
         return;
       }
 
       await refreshFromSupabase();
     } catch (e) {
-      console.error("Unexpected error updating checklist item", e);
-      setError("Unexpected error updating checklist item.");
+      console.error(e);
+      setError("Unexpected error updating report.");
     } finally {
       setSaving(false);
     }
   }
 
+  function patchSection<K extends keyof ReadinessItems>(
+    rec: StartupChecklist,
+    section: K,
+    patch: Partial<NonNullable<ReadinessItems[K]>>
+  ) {
+    const merged = mergeItems(rec.items);
+    const next: ReadinessItems = { ...merged };
+
+    const currentSection = (next[section] ?? {}) as NonNullable<ReadinessItems[K]>;
+    next[section] = { ...currentSection, ...patch } as ReadinessItems[K];
+
+    void saveItems(rec, next);
+  }
+
+  function toggleSectionField<K extends keyof ReadinessItems>(
+    rec: StartupChecklist,
+    section: K,
+    field: keyof NonNullable<ReadinessItems[K]>
+  ) {
+    const merged = mergeItems(rec.items);
+    const sec = (merged[section] ?? {}) as Record<string, unknown>;
+    const current = safeBool(sec[String(field)]);
+    patchSection(rec, section, { [field]: !current } as Partial<NonNullable<ReadinessItems[K]>>);
+  }
+
+  function markShiftStarted(rec: StartupChecklist) {
+    const merged = mergeItems(rec.items);
+    const started = safeString(merged.confirmation?.shiftStartedAtISO).trim();
+
+    patchSection(rec, "confirmation", {
+      shiftStartedAtISO: started || isoNow(),
+    });
+    setInfo("Shift start time recorded.");
+  }
+
+  function markCompleted(rec: StartupChecklist) {
+    const { status } = computeStatus(rec);
+    if (status !== "Ready" && status !== "Completed") {
+      setError("This report must be Ready (all required items complete) before it can be closed.");
+      return;
+    }
+
+    const merged = mergeItems(rec.items);
+    const completed = safeString(merged.confirmation?.completedAtISO).trim();
+
+    patchSection(rec, "confirmation", {
+      completedAtISO: completed || isoNow(),
+    });
+    setInfo("Report closed (Completed).");
+  }
+
+  // --------------------
   // Route protection
+  // --------------------
+
   if (!currentUser) {
     return (
       <div className="min-h-screen bg-slate-950 text-slate-400 flex flex-col items-center justify-center text-sm gap-2">
         <div>Redirecting to login…</div>
-        <a
-          href="/auth"
-          className="text-sky-400 text-xs underline hover:text-sky-300"
-        >
+        <a href="/auth" className="text-sky-400 text-xs underline hover:text-sky-300">
           Click here if you are not redirected.
         </a>
       </div>
     );
   }
 
-  const buildingList = isLead && leadBuilding ? [leadBuilding] : BUILDINGS;
+  // --------------------
+  // Render
+  // --------------------
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-950 to-slate-900 text-slate-50">
@@ -437,12 +724,9 @@ export default function StartupChecklistsPage() {
         {/* Header */}
         <div className="flex items-center justify-between gap-4">
           <div>
-            <h1 className="text-2xl font-semibold text-slate-50">
-              Startup Meeting Checklists
-            </h1>
+            <h1 className="text-2xl font-semibold text-slate-50">Shift Readiness Reports</h1>
             <p className="text-sm text-slate-400">
-              Track daily pre-shift startup meetings by building and shift with
-              required steps and completion status.
+              Confirm staffing, safety, equipment, dock readiness, goals, and communication — with accountability.
             </p>
           </div>
           <Link
@@ -453,85 +737,19 @@ export default function StartupChecklistsPage() {
           </Link>
         </div>
 
-        {/* Summary cards */}
-        <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
-          <div className="rounded-2xl bg-slate-900 border border-slate-800 p-4">
-            <div className="text-xs text-slate-400 mb-1">Total Checklists</div>
-            <div className="text-2xl font-semibold text-sky-300">
-              {summary.total}
-            </div>
-          </div>
-          <div className="rounded-2xl bg-slate-900 border border-slate-800 p-4">
-            <div className="text-xs text-slate-400 mb-1">Completed</div>
-            <div className="text-2xl font-semibold text-emerald-300">
-              {summary.completed}
-            </div>
-          </div>
-          <div className="rounded-2xl bg-slate-900 border border-slate-800 p-4">
-            <div className="text-xs text-slate-400 mb-1">In Progress</div>
-            <div className="text-2xl font-semibold text-amber-300">
-              {summary.inProgress}
-            </div>
-          </div>
-          <div className="rounded-2xl bg-slate-900 border border-slate-800 p-4">
-            <div className="text-xs text-slate-400 mb-1">
-              Today&apos;s Checklists
-            </div>
-            <div className="text-2xl font-semibold text-slate-100">
-              {summary.todayTotal}
-            </div>
-          </div>
-          <div className="rounded-2xl bg-slate-900 border border-slate-800 p-4">
-            <div className="text-xs text-slate-400 mb-1">Today Completed</div>
-            <div className="text-2xl font-semibold text-emerald-300">
-              {summary.todayCompleted}
-            </div>
-          </div>
-        </div>
-
-        {/* Building stats */}
-        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6">
-          <h2 className="text-sm font-semibold text-slate-100 mb-3">
-            Building Startup Overview
-          </h2>
-          <div className="grid grid-cols-1 md:grid-cols-5 gap-3 text-xs">
-            {buildingList.map((b) => {
-              const stats = buildingStats[b] || { total: 0, completed: 0 };
-              const rate =
-                stats.total === 0
-                  ? 0
-                  : Math.round((stats.completed / stats.total) * 100);
-              return (
-                <div
-                  key={b}
-                  className="rounded-xl bg-slate-950 border border-slate-800 p-3"
-                >
-                  <div className="text-slate-300 mb-1 font-semibold">{b}</div>
-                  <div className="text-slate-400">
-                    Checklists:{" "}
-                    <span className="text-slate-100">{stats.total}</span>
-                  </div>
-                  <div className="text-slate-400">
-                    Completed:{" "}
-                    <span className="text-emerald-300">
-                      {stats.completed}
-                    </span>
-                  </div>
-                  <div className="text-slate-400 mt-1">
-                    Completion Rate:{" "}
-                    <span className="text-sky-300">{rate}%</span>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+        {/* Summary */}
+        <div className="grid grid-cols-1 md:grid-cols-6 gap-4">
+          <StatCard label="Total" value={summary.total} valueClass="text-sky-300" />
+          <StatCard label="Draft" value={summary.draft} valueClass="text-slate-100" />
+          <StatCard label="In Progress" value={summary.inProgress} valueClass="text-amber-300" />
+          <StatCard label="Ready" value={summary.ready} valueClass="text-sky-200" />
+          <StatCard label="Completed" value={summary.completed} valueClass="text-emerald-300" />
+          <StatCard label="Today Ready/Done" value={summary.todayReady} valueClass="text-emerald-200" />
         </div>
 
         {/* Error / info */}
         {error && (
-          <div className="text-xs text-red-300 bg-red-950/40 border border-red-800 rounded px-3 py-2">
-            {error}
-          </div>
+          <div className="text-xs text-red-300 bg-red-950/40 border border-red-800 rounded px-3 py-2">{error}</div>
         )}
         {info && (
           <div className="text-xs text-emerald-300 bg-emerald-950/40 border border-emerald-800 rounded px-3 py-2">
@@ -539,20 +757,15 @@ export default function StartupChecklistsPage() {
           </div>
         )}
 
-        {/* Form + list */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Create / Edit checklist */}
+          {/* Create / Edit Header */}
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4">
             <div className="flex items-center justify-between gap-2">
               <h2 className="text-sm font-semibold text-slate-100">
-                {editingId ? "Edit Startup Checklist" : "Create Startup Checklist"}
+                {editingId ? "Edit Report Header" : "Create Shift Readiness Report"}
               </h2>
               {editingId && (
-                <button
-                  type="button"
-                  onClick={resetForm}
-                  className="text-[11px] text-sky-300 hover:underline"
-                >
+                <button type="button" onClick={resetForm} className="text-[11px] text-sky-300 hover:underline">
                   Clear / New
                 </button>
               )}
@@ -561,18 +774,15 @@ export default function StartupChecklistsPage() {
             <form onSubmit={handleSave} className="space-y-3 text-sm">
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-xs text-slate-300 mb-1">
-                    Building
-                  </label>
+                  <label className="block text-xs text-slate-300 mb-1">Building</label>
                   <select
                     className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2 text-sm text-slate-50"
                     value={building}
                     onChange={(e) => setBuilding(e.target.value)}
-                    disabled={isLead && !!leadBuilding}
+                    disabled={lockBuildingOnCreate() || (!!editingId && !(isSuperAdmin || isBuildingManager))}
                   >
                     {BUILDINGS.map((b) => {
-                      if (isLead && leadBuilding && b !== leadBuilding)
-                        return null;
+                      if ((isLead || isBuildingManager) && userBuilding && b !== userBuilding) return null;
                       return (
                         <option key={b} value={b}>
                           {b}
@@ -581,14 +791,14 @@ export default function StartupChecklistsPage() {
                     })}
                   </select>
                 </div>
+
                 <div>
-                  <label className="block text-xs text-slate-300 mb-1">
-                    Shift
-                  </label>
+                  <label className="block text-xs text-slate-300 mb-1">Shift</label>
                   <select
                     className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2 text-sm text-slate-50"
                     value={shift}
                     onChange={(e) => setShift(e.target.value)}
+                    disabled={lockShiftOnCreate() || (!!editingId && !(isSuperAdmin || isBuildingManager))}
                   >
                     {SHIFTS.map((s) => (
                       <option key={s} value={s}>
@@ -600,14 +810,13 @@ export default function StartupChecklistsPage() {
               </div>
 
               <div>
-                <label className="block text-xs text-slate-300 mb-1">
-                  Date
-                </label>
+                <label className="block text-xs text-slate-300 mb-1">Date</label>
                 <input
                   type="date"
                   className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2 text-sm text-slate-50"
                   value={date}
                   onChange={(e) => setDate(e.target.value)}
+                  disabled={!!editingId && !(isSuperAdmin || isBuildingManager)}
                 />
               </div>
 
@@ -616,40 +825,28 @@ export default function StartupChecklistsPage() {
                 disabled={saving}
                 className="mt-2 rounded-lg bg-sky-600 hover:bg-sky-500 disabled:opacity-60 text-sm font-medium text-white px-4 py-2"
               >
-                {saving
-                  ? editingId
-                    ? "Saving…"
-                    : "Creating…"
-                  : editingId
-                  ? "Save Changes"
-                  : "Create Checklist"}
+                {saving ? (editingId ? "Saving…" : "Creating…") : editingId ? "Save Header Changes" : "Create Report"}
               </button>
 
-              {loading && (
-                <div className="text-[11px] text-slate-500 mt-2">
-                  Loading startup checklists…
-                </div>
-              )}
+              {loading && <div className="text-[11px] text-slate-500 mt-2">Loading reports…</div>}
             </form>
           </div>
 
           {/* List */}
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4 lg:col-span-2">
             <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
-              <h2 className="text-sm font-semibold text-slate-100">
-                Startup Checklist History
-              </h2>
+              <h2 className="text-sm font-semibold text-slate-100">Report History</h2>
+
               <div className="flex flex-wrap gap-2 text-xs">
                 <select
                   className="rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-slate-50"
                   value={filterBuilding}
                   onChange={(e) => setFilterBuilding(e.target.value)}
-                  disabled={isLead && !!leadBuilding}
+                  disabled={(isLead || isBuildingManager) && !!userBuilding}
                 >
-                  {!isLead && <option value="ALL">All Buildings</option>}
+                  {!(isLead || isBuildingManager) && <option value="ALL">All Buildings</option>}
                   {BUILDINGS.map((b) => {
-                    if (isLead && leadBuilding && b !== leadBuilding)
-                      return null;
+                    if ((isLead || isBuildingManager) && userBuilding && b !== userBuilding) return null;
                     return (
                       <option key={b} value={b}>
                         {b}
@@ -657,39 +854,39 @@ export default function StartupChecklistsPage() {
                     );
                   })}
                 </select>
+
                 <select
                   className="rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-slate-50"
                   value={filterShift}
                   onChange={(e) => setFilterShift(e.target.value)}
+                  disabled={isLead && !!userShift}
                 >
-                  <option value="ALL">All Shifts</option>
+                  {!isLead && <option value="ALL">All Shifts</option>}
                   {SHIFTS.map((s) => (
                     <option key={s} value={s}>
                       {s}
                     </option>
                   ))}
                 </select>
+
                 <select
                   className="rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-slate-50"
                   value={filterStatus}
-                  onChange={(e) =>
-                    setFilterStatus(
-                      e.target.value as ChecklistStatus | "ALL"
-                    )
-                  }
+                  onChange={(e) => setFilterStatus(e.target.value as ReportStatus | "ALL")}
                 >
                   <option value="ALL">All Status</option>
+                  <option value="Draft">Draft</option>
                   <option value="In Progress">In Progress</option>
+                  <option value="Ready">Ready</option>
                   <option value="Completed">Completed</option>
                 </select>
+
                 <button
                   type="button"
                   onClick={() => {
-                    setFilterShift("ALL");
                     setFilterStatus("ALL");
-                    setFilterBuilding(
-                      isLead && leadBuilding ? leadBuilding : "ALL"
-                    );
+                    setFilterShift(isLead && userShift ? userShift : "ALL");
+                    setFilterBuilding((isLead || isBuildingManager) && userBuilding ? userBuilding : "ALL");
                   }}
                   className="text-[11px] text-sky-300 hover:underline"
                 >
@@ -699,119 +896,176 @@ export default function StartupChecklistsPage() {
             </div>
 
             {filteredRecords.length === 0 ? (
-              <p className="text-sm text-slate-500">
-                No checklists match the current filters.
-              </p>
+              <p className="text-sm text-slate-500">No reports match the current filters.</p>
             ) : (
-              <div className="space-y-3 text-xs max-h-[520px] overflow-auto pr-1">
+              <div className="space-y-3 text-xs max-h-[680px] overflow-auto pr-1">
                 {filteredRecords.map((r) => {
-                  const status = getStatus(r);
-                  const progress = getProgress(r);
+                  const { status, percent, done, total } = computeStatus(r);
+                  const meta = r.items._meta || {};
+                  const createdBy = safeString(meta.createdByName) || "Unknown";
+                  const updatedBy = safeString(meta.updatedByName);
+                  const updatedAt = safeString(meta.updatedAtISO);
+
                   return (
-                    <div
-                      key={r.id}
-                      className="border border-slate-800 rounded-xl bg-slate-950 p-3 space-y-2"
-                    >
-                      <div className="flex items-start justify-between gap-2">
+                    <div key={r.id} className="border border-slate-800 rounded-xl bg-slate-950 p-3 space-y-3">
+                      <div className="flex items-start justify-between gap-3">
                         <div>
                           <div className="text-slate-100 text-sm font-semibold">
-                            {r.building} • {r.shift} Shift
-                          </div>
-                          <div className="text-slate-400">
-                            Date: {r.date}
+                            {r.building} • {r.shift} Shift • {r.date}
                           </div>
                           <div className="text-[11px] text-slate-500">
-                            Created: {r.createdAt.slice(0, 10)}
-                            {r.completedAt &&
-                              ` • Completed: ${r.completedAt.slice(0, 10)}`}
+                            Entered by: <span className="text-slate-200">{createdBy}</span>
+                            {updatedBy && updatedAt ? (
+                              <>
+                                {" "}
+                                • Updated: <span className="text-slate-200">{updatedBy}</span> ({formatISODate(updatedAt)})
+                              </>
+                            ) : null}
+                          </div>
+                          <div className="text-[11px] text-slate-500">
+                            Created: {formatISODate(r.createdAt)}
+                            {r.completedAt ? ` • Legacy Completed: ${formatISODate(r.completedAt)}` : ""}
                           </div>
                         </div>
+
                         <div className="text-right space-y-1">
-                          <div className="flex items-center justify-end gap-2">
-                            <span
-                              className={
-                                status === "Completed"
-                                  ? "inline-flex items-center px-2 py-0.5 rounded-full bg-emerald-900/60 text-emerald-200 border border-emerald-700 text-[11px]"
-                                  : "inline-flex items-center px-2 py-0.5 rounded-full bg-amber-900/60 text-amber-200 border border-amber-700 text-[11px]"
-                              }
-                            >
-                              {status}
-                            </span>
-                          </div>
+                          <span className={pillClass(status)}>{status}</span>
+
                           <div className="text-[11px] text-slate-400">
-                            Steps: {progress.done}/{progress.total} (
-                            {progress.percent}%)
+                            Readiness: {done}/{total} ({percent}%)
                           </div>
-                          <div className="w-28 h-1.5 rounded-full bg-slate-800 overflow-hidden">
-                            <div
-                              className="h-full bg-sky-500"
-                              style={{ width: `${progress.percent}%` }}
-                            />
+                          <div className="w-32 h-1.5 rounded-full bg-slate-800 overflow-hidden ml-auto">
+                            <div className="h-full bg-sky-500" style={{ width: `${percent}%` }} />
                           </div>
+
                           <div className="flex items-center justify-end gap-2 pt-1">
-                            <button
-                              type="button"
-                              onClick={() => startEdit(r)}
-                              className="text-[11px] text-sky-300 hover:underline"
-                            >
-                              Edit
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleDelete(r.id)}
-                              className="text-[11px] text-rose-300 hover:underline"
-                              disabled={saving}
-                            >
-                              Delete
-                            </button>
+                            {canEditRecord(r) && (
+                              <button
+                                type="button"
+                                onClick={() => startEdit(r)}
+                                className="text-[11px] text-sky-300 hover:underline"
+                              >
+                                Edit Header
+                              </button>
+                            )}
+                            {canDeleteRecord() && (
+                              <button
+                                type="button"
+                                onClick={() => handleDelete(r)}
+                                className="text-[11px] text-rose-300 hover:underline"
+                                disabled={saving}
+                              >
+                                Delete
+                              </button>
+                            )}
                           </div>
                         </div>
                       </div>
 
-                      {/* Checklist toggles */}
-                      <div className="grid grid-cols-1 md:grid-cols-3 gap-2 pt-2 border-t border-slate-800">
+                      {/* Required toggles */}
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-2 pt-2 border-t border-slate-800">
                         <ChecklistToggle
-                          label="Staffing confirmed"
-                          checked={r.items.staffingConfirmed}
-                          onToggle={() =>
-                            toggleItem(r.id, "staffingConfirmed")
-                          }
+                          label="All workers arrived / attendance verified"
+                          checked={safeBool(r.items.staffing?.allArrived)}
+                          disabled={!canEditRecord(r) || saving}
+                          onToggle={() => toggleSectionField(r, "staffing", "allArrived")}
+                        />
+                        <ChecklistToggle
+                          label="Staffing adequate for today’s volume"
+                          checked={safeBool(r.items.staffing?.staffingAdequate)}
+                          disabled={!canEditRecord(r) || saving}
+                          onToggle={() => toggleSectionField(r, "staffing", "staffingAdequate")}
                         />
                         <ChecklistToggle
                           label="Safety talk completed"
-                          checked={r.items.safetyTalkCompleted}
-                          onToggle={() =>
-                            toggleItem(r.id, "safetyTalkCompleted")
-                          }
+                          checked={safeBool(r.items.safety?.safetyTalkCompleted)}
+                          disabled={!canEditRecord(r) || saving}
+                          onToggle={() => toggleSectionField(r, "safety", "safetyTalkCompleted")}
                         />
                         <ChecklistToggle
-                          label="Equipment checked"
-                          checked={r.items.equipmentChecked}
-                          onToggle={() =>
-                            toggleItem(r.id, "equipmentChecked")
-                          }
+                          label="Stretching completed"
+                          checked={safeBool(r.items.safety?.stretchingCompleted)}
+                          disabled={!canEditRecord(r) || saving}
+                          onToggle={() => toggleSectionField(r, "safety", "stretchingCompleted")}
+                        />
+                        <ChecklistToggle
+                          label="PPE check completed"
+                          checked={safeBool(r.items.safety?.ppeCheckCompleted)}
+                          disabled={!canEditRecord(r) || saving}
+                          onToggle={() => toggleSectionField(r, "safety", "ppeCheckCompleted")}
                         />
                         <ChecklistToggle
                           label="Dock/aisles clear"
-                          checked={r.items.dockAislesClear}
-                          onToggle={() =>
-                            toggleItem(r.id, "dockAislesClear")
-                          }
+                          checked={safeBool(r.items.facility?.dockAislesClear)}
+                          disabled={!canEditRecord(r) || saving}
+                          onToggle={() => toggleSectionField(r, "facility", "dockAislesClear")}
+                        />
+                        <ChecklistToggle
+                          label="Equipment checked"
+                          checked={safeBool(r.items.equipment?.equipmentChecked)}
+                          disabled={!canEditRecord(r) || saving}
+                          onToggle={() => toggleSectionField(r, "equipment", "equipmentChecked")}
                         />
                         <ChecklistToggle
                           label="Goals reviewed"
-                          checked={r.items.goalsReviewed}
-                          onToggle={() =>
-                            toggleItem(r.id, "goalsReviewed")
-                          }
+                          checked={safeBool(r.items.plan?.goalsReviewed)}
+                          disabled={!canEditRecord(r) || saving}
+                          onToggle={() => toggleSectionField(r, "plan", "goalsReviewed")}
                         />
                         <ChecklistToggle
                           label="WhatsApp broadcast sent"
-                          checked={r.items.whatsappBroadcastSent}
-                          onToggle={() =>
-                            toggleItem(r.id, "whatsappBroadcastSent")
-                          }
+                          checked={safeBool(r.items.communication?.whatsappBroadcastSent)}
+                          disabled={!canEditRecord(r) || saving}
+                          onToggle={() => toggleSectionField(r, "communication", "whatsappBroadcastSent")}
                         />
+                        <ChecklistToggle
+                          label="Ready to start (final confirmation)"
+                          checked={safeBool(r.items.confirmation?.readyToStart)}
+                          disabled={!canEditRecord(r) || saving}
+                          onToggle={() => toggleSectionField(r, "confirmation", "readyToStart")}
+                        />
+                      </div>
+
+                      {/* Notes */}
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-2">
+                        <TextAreaField
+                          label="Late / No-show details"
+                          value={safeString(r.items.staffing?.lateOrNoShowDetails)}
+                          disabled={!canEditRecord(r) || saving}
+                          onChange={(v) => patchSection(r, "staffing", { lateOrNoShowDetails: v })}
+                        />
+                        <TextAreaField
+                          label="Daily focus message"
+                          value={safeString(r.items.communication?.dailyFocusMessage)}
+                          disabled={!canEditRecord(r) || saving}
+                          onChange={(v) => patchSection(r, "communication", { dailyFocusMessage: v })}
+                        />
+                      </div>
+
+                      {/* Closeout actions */}
+                      <div className="flex flex-wrap gap-2 pt-2 border-t border-slate-800">
+                        <button
+                          type="button"
+                          onClick={() => markShiftStarted(r)}
+                          disabled={!canEditRecord(r) || saving}
+                          className="text-[12px] px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 hover:bg-slate-800 disabled:opacity-60"
+                        >
+                          Record Shift Start
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => markCompleted(r)}
+                          disabled={!canEditRecord(r) || saving}
+                          className="text-[12px] px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-600 disabled:opacity-60 text-white"
+                        >
+                          Close Report (Completed)
+                        </button>
+                      </div>
+
+                      <div className="text-[11px] text-slate-400">
+                        Shift Started:{" "}
+                        <span className="text-slate-200">{formatISODate(r.items.confirmation?.shiftStartedAtISO)}</span>{" "}
+                        • Closed: <span className="text-slate-200">{formatISODate(r.items.confirmation?.completedAtISO)}</span>
                       </div>
                     </div>
                   );
@@ -825,33 +1079,71 @@ export default function StartupChecklistsPage() {
   );
 }
 
+// --------------------
+// UI pieces
+// --------------------
+
+function StatCard({ label, value, valueClass }: { label: string; value: number; valueClass?: string }) {
+  return (
+    <div className="rounded-2xl bg-slate-900 border border-slate-800 p-4">
+      <div className="text-xs text-slate-400 mb-1">{label}</div>
+      <div className={`text-2xl font-semibold ${valueClass || "text-slate-100"}`}>{value}</div>
+    </div>
+  );
+}
+
 function ChecklistToggle({
   label,
   checked,
   onToggle,
+  disabled,
 }: {
   label: string;
   checked: boolean;
   onToggle: () => void;
+  disabled?: boolean;
 }) {
   return (
     <button
       type="button"
       onClick={onToggle}
-      className={`flex items-center gap-2 px-2 py-1.5 rounded-lg border text-[11px] text-left ${
-        checked
-          ? "bg-emerald-900/40 border-emerald-700 text-emerald-100"
-          : "bg-slate-900 border-slate-700 text-slate-200"
+      disabled={disabled}
+      className={`flex items-center gap-2 px-2 py-2 rounded-lg border text-[11px] text-left disabled:opacity-60 ${
+        checked ? "bg-emerald-900/40 border-emerald-700 text-emerald-100" : "bg-slate-900 border-slate-700 text-slate-200"
       }`}
     >
       <span
         className={`w-3 h-3 rounded border ${
-          checked
-            ? "bg-emerald-500 border-emerald-400"
-            : "bg-slate-950 border-slate-600"
+          checked ? "bg-emerald-500 border-emerald-400" : "bg-slate-950 border-slate-600"
         }`}
       />
       <span>{label}</span>
     </button>
+  );
+}
+
+function TextAreaField({
+  label,
+  value,
+  onChange,
+  disabled,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <div>
+      <div className="text-[11px] text-slate-300 mb-1">{label}</div>
+      <textarea
+        value={value}
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.value)}
+        rows={3}
+        className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2 text-[12px] text-slate-50 disabled:opacity-60"
+        placeholder="Be specific. This becomes your daily record."
+      />
+    </div>
   );
 }

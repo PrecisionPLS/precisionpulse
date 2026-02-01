@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { useCurrentUser } from "@/lib/useCurrentUser";
 import { BUILDINGS } from "@/lib/buildings";
@@ -21,21 +21,31 @@ type ContainerWorker = {
   minutesWorked?: number | null;
   percentContribution?: number | null;
   payoutAmount?: number | null;
-  [key: string]: any;
+  // ✅ was `any` (eslint) → use unknown
+  [key: string]: unknown;
 };
 
 type ContainerRow = {
   id: string;
   workOrderId?: string | null;
+  work_order_id?: string | null;
   building?: string | null;
   shift?: string | null;
   date?: string | null;
+  work_date?: string | null;
+  workDate?: string | null;
+  created_at?: string | null;
+
   container_no?: string | null;
   pieces_total?: number | null;
   skus_total?: number | null;
   container_pay_total?: number | null;
+  pay_total?: number | null;
+
   workers?: ContainerWorker[] | null;
-  [key: string]: any;
+
+  // ✅ was `any` (eslint) → use unknown
+  [key: string]: unknown;
 };
 
 type WorkOrderRecord = {
@@ -46,7 +56,8 @@ type WorkOrderRecord = {
   status?: string;
   createdAt?: string;
   notes?: string;
-  [key: string]: any;
+  // ✅ was `any` (eslint) → use unknown
+  [key: string]: unknown;
 };
 
 type StaffingRow = {
@@ -104,26 +115,65 @@ type LeaderboardRow = {
   avgPPH: number;
 };
 
-function parseDateOnly(value: string | null | undefined): string | null {
+/**
+ * ✅ TIMEZONE + DATE SAFETY (America/New_York)
+ * Fixes:
+ * - "missing day" caused by UTC slicing / Date parsing differences
+ * - stable comparisons using epoch-days (not local timezone Date math)
+ */
+function nyISODate(d: Date = new Date()): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(d);
+
+  const y = parts.find((p) => p.type === "year")?.value ?? "1970";
+  const m = parts.find((p) => p.type === "month")?.value ?? "01";
+  const day = parts.find((p) => p.type === "day")?.value ?? "01";
+  return `${y}-${m}-${day}`;
+}
+
+function isYMD(value: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value);
+}
+
+function parseDateOnlyNY(value: string | null | undefined): string | null {
   if (!value) return null;
-  return value.slice(0, 10);
+
+  const s = String(value);
+  // If already YYYY-MM-DD, trust it
+  if (isYMD(s.slice(0, 10))) return s.slice(0, 10);
+
+  // Otherwise interpret as timestamp and render NY date
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return null;
+  return nyISODate(d);
+}
+
+function ymdToEpochDay(ymd: string): number {
+  // ymd = YYYY-MM-DD
+  const y = Number(ymd.slice(0, 4));
+  const m = Number(ymd.slice(5, 7));
+  const d = Number(ymd.slice(8, 10));
+  return Math.floor(Date.UTC(y, m - 1, d) / 86400000);
 }
 
 function isWithinPreset(dateStr: string | null, range: DateRange): boolean {
-  if (!dateStr) return range === "All time";
   if (range === "All time") return true;
-  if (range === "Custom") return true; // handled by custom range check
+  if (range === "Custom") return true; // handled elsewhere
+  if (!dateStr) return false;
 
   const only = dateStr.slice(0, 10);
-  const d = new Date(only);
-  if (Number.isNaN(d.getTime())) return false;
+  if (!isYMD(only)) return false;
 
-  const today = new Date();
-  const todayOnly = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-  const diffMs = todayOnly.getTime() - d.getTime();
-  const diffDays = diffMs / (1000 * 60 * 60 * 24);
+  const todayNY = nyISODate();
+  const todayDay = ymdToEpochDay(todayNY);
+  const dDay = ymdToEpochDay(only);
+  const diffDays = todayDay - dDay;
 
-  if (range === "Today") return only === today.toISOString().slice(0, 10);
+  if (range === "Today") return only === todayNY;
   if (range === "Last 7 days") return diffDays >= 0 && diffDays <= 7;
   if (range === "Last 30 days") return diffDays >= 0 && diffDays <= 30;
 
@@ -133,8 +183,9 @@ function isWithinPreset(dateStr: string | null, range: DateRange): boolean {
 function isWithinCustom(dateStr: string | null, start: string | null, end: string | null): boolean {
   if (!dateStr) return false;
   const only = dateStr.slice(0, 10);
+  if (!isYMD(only)) return false;
 
-  // if user didn't set one side, treat it as open-ended
+  // open-ended if user leaves blank
   if (!start && !end) return true;
 
   if (start && only < start) return false;
@@ -147,7 +198,7 @@ function isWithinCustom(dateStr: string | null, start: string | null, end: strin
  */
 function getContainerDate(c: ContainerRow): string | null {
   return (
-    parseDateOnly(
+    parseDateOnlyNY(
       (c.date as string | undefined) ??
         (c.work_date as string | undefined) ??
         (c.workDate as string | undefined) ??
@@ -173,6 +224,16 @@ function getContainerShift(c: ContainerRow): string {
     (c.shiftName as string | undefined) ??
     ""
   );
+}
+
+function getContainerWorkOrderId(c: ContainerRow): string {
+  const raw =
+    (c.workOrderId as string | undefined) ??
+    (c.work_order_id as string | undefined) ??
+    (c.workOrderID as string | undefined) ??
+    (c.workorder_id as string | undefined) ??
+    "";
+  return raw ? String(raw) : "";
 }
 
 function getContainerNo(c: ContainerRow): string {
@@ -373,27 +434,37 @@ export default function ReportsPage() {
 
   const effectiveBuildingFilter = isLead && leadBuilding ? leadBuilding : buildingFilter;
 
-  function matchesBuilding(b: string | null | undefined): boolean {
-    if (effectiveBuildingFilter === "ALL") return true;
-    return (b || "") === effectiveBuildingFilter;
-  }
+  // ✅ useCallback fixes the missing deps warnings in useMemo below
+  const matchesBuilding = useCallback(
+    (b: string | null | undefined): boolean => {
+      if (effectiveBuildingFilter === "ALL") return true;
+      return (b || "") === effectiveBuildingFilter;
+    },
+    [effectiveBuildingFilter]
+  );
 
-  function matchesShift(s: string | null | undefined): boolean {
-    if (shiftFilter === "ALL") return true;
-    return (s || "") === shiftFilter;
-  }
+  const matchesShift = useCallback(
+    (s: string | null | undefined): boolean => {
+      if (shiftFilter === "ALL") return true;
+      return (s || "") === shiftFilter;
+    },
+    [shiftFilter]
+  );
 
-  const isDateMatch = (dateStr: string | null) => {
-    if (!isWithinPreset(dateStr, dateRange)) return false;
+  const isDateMatch = useCallback(
+    (dateStr: string | null): boolean => {
+      if (!isWithinPreset(dateStr, dateRange)) return false;
 
-    if (dateRange === "Custom") {
-      const start = customStart.trim() ? customStart.trim() : null;
-      const end = customEnd.trim() ? customEnd.trim() : null;
-      return isWithinCustom(dateStr, start, end);
-    }
+      if (dateRange === "Custom") {
+        const start = customStart.trim() ? customStart.trim() : null;
+        const end = customEnd.trim() ? customEnd.trim() : null;
+        return isWithinCustom(dateStr, start, end);
+      }
 
-    return true;
-  };
+      return true;
+    },
+    [dateRange, customStart, customEnd]
+  );
 
   // Filtered containers and staffing
   const filteredContainers = useMemo(() => {
@@ -403,16 +474,16 @@ export default function ReportsPage() {
       const d = getContainerDate(c);
       return isDateMatch(d);
     });
-  }, [containers, effectiveBuildingFilter, shiftFilter, dateRange, customStart, customEnd]);
+  }, [containers, matchesBuilding, matchesShift, isDateMatch]);
 
   const filteredStaffing = useMemo(() => {
     return staffing.filter((s) => {
       if (!matchesBuilding(s.building ?? null)) return false;
       if (!matchesShift(s.shift ?? null)) return false;
-      const d = parseDateOnly(s.date ?? null);
+      const d = parseDateOnlyNY(s.date ?? null);
       return isDateMatch(d);
     });
-  }, [staffing, effectiveBuildingFilter, shiftFilter, dateRange, customStart, customEnd]);
+  }, [staffing, matchesBuilding, matchesShift, isDateMatch]);
 
   // Map work orders by id
   const workOrderMap = useMemo(() => {
@@ -435,7 +506,7 @@ export default function ReportsPage() {
       const containerPay = getContainerPayTotal(c);
       const workersArr = (c.workers || []) as ContainerWorker[];
 
-      const workOrderId = c.workOrderId ? String(c.workOrderId) : "";
+      const workOrderId = getContainerWorkOrderId(c);
       const workOrder = workOrderId ? workOrderMap.get(workOrderId) : undefined;
       const workOrderName = workOrder?.name ?? "";
 
@@ -505,7 +576,7 @@ export default function ReportsPage() {
     const rows: StaffingViewRow[] = [];
 
     for (const s of filteredStaffing) {
-      const date = parseDateOnly(s.date ?? null) || "";
+      const date = parseDateOnlyNY(s.date ?? null) || "";
       const building = s.building || "";
       const shift = s.shift || "";
       const required = s.required_headcount || 0;
@@ -618,32 +689,97 @@ export default function ReportsPage() {
     return `${b}-${s}-${d}`;
   }
 
-  // CSV handlers (same outputs, now obey shift + custom dates too)
+  // CSV handlers
   function handleDownloadProductionCsv() {
     const header = [
-      "Date","Building","Shift","Work Order","Container #","Worker","Minutes Worked",
-      "% Contribution","Payout Amount","Container Pay Total","Pieces Total","SKUs Total",
+      "Date",
+      "Building",
+      "Shift",
+      "Work Order",
+      "Container #",
+      "Worker",
+      "Minutes Worked",
+      "% Contribution",
+      "Payout Amount",
+      "Container Pay Total",
+      "Pieces Total",
+      "SKUs Total",
     ];
     const rows = productionRows.map((r) => [
-      r.date, r.building, r.shift, r.workOrderName || r.workOrderId || "",
-      r.containerNo, r.workerName, r.minutesWorked, r.percentContribution,
-      r.payoutAmount.toFixed(2), r.containerPayTotal.toFixed(2), r.piecesTotal, r.skusTotal,
+      r.date,
+      r.building,
+      r.shift,
+      r.workOrderName || r.workOrderId || "",
+      r.containerNo,
+      r.workerName,
+      r.minutesWorked,
+      r.percentContribution,
+      r.payoutAmount.toFixed(2),
+      r.containerPayTotal.toFixed(2),
+      r.piecesTotal,
+      r.skusTotal,
     ]);
     downloadCsv(`production-pay-${makeFilterLabel()}.csv`, header, rows);
   }
 
   function handleDownloadShiftCsv() {
-    const header = ["Date","Building","Shift","Containers","Pieces Total","Minutes Total","PPH"];
+    const header = ["Date", "Building", "Shift", "Containers", "Pieces Total", "Minutes Total", "PPH"];
     const rows = shiftRows.map((r) => [
-      r.date, r.building, r.shift, r.containers, r.piecesTotal, r.minutesTotal, r.pph.toFixed(1),
+      r.date,
+      r.building,
+      r.shift,
+      r.containers,
+      r.piecesTotal,
+      r.minutesTotal,
+      r.pph.toFixed(1),
     ]);
     downloadCsv(`shift-performance-${makeFilterLabel()}.csv`, header, rows);
   }
 
   function handleDownloadStaffingCsv() {
-    const header = ["Date","Building","Shift","Required","Actual","Delta","Status"];
+    const header = ["Date", "Building", "Shift", "Required", "Actual", "Delta", "Status"];
     const rows = staffingRows.map((r) => [r.date, r.building, r.shift, r.required, r.actual, r.delta, r.status]);
     downloadCsv(`staffing-coverage-${makeFilterLabel()}.csv`, header, rows);
+  }
+
+  /**
+   * ✅ NEW: Invoicing Export (container-level)
+   * “Excel should have work order, container, piece count, date, etc.”
+   * This export is ONE ROW PER CONTAINER (not per worker).
+   */
+  function handleDownloadInvoicingCsv() {
+    const header = [
+      "Date",
+      "Building",
+      "Shift",
+      "Work Order ID",
+      "Work Order Name",
+      "Container #",
+      "Pieces",
+      "SKUs",
+      "Container Pay Total",
+    ];
+
+    const rows = filteredContainers
+      .map((c) => {
+        const date = getContainerDate(c) || "";
+        const building = getContainerBuilding(c);
+        const shift = getContainerShift(c);
+        const containerNo = getContainerNo(c);
+        const pieces = getPiecesTotal(c);
+        const skus = getSkusTotal(c);
+        const payTotal = getContainerPayTotal(c);
+
+        const workOrderId = getContainerWorkOrderId(c);
+        const wo = workOrderId ? workOrderMap.get(workOrderId) : undefined;
+        const workOrderName = wo?.name ?? "";
+
+        return [date, building, shift, workOrderId, workOrderName, containerNo, pieces, skus, payTotal.toFixed(2)];
+      })
+      // Keep it stable
+      .sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+
+    downloadCsv(`invoicing-export-${makeFilterLabel()}.csv`, header, rows);
   }
 
   if (!currentUser) {
@@ -665,10 +801,9 @@ export default function ReportsPage() {
           <div>
             <h1 className="text-2xl font-semibold text-slate-50">Reports & KPIs</h1>
             <p className="text-sm text-slate-400">
-              Live analytics across{" "}
-              <span className="font-semibold text-sky-300">{buildingLabel}</span>{" "}
-              • <span className="font-semibold text-sky-300">{shiftLabel}</span>{" "}
-              • <span className="text-slate-300">{dateRange === "Custom" ? "Custom range" : dateRange}</span>
+              Live analytics across <span className="font-semibold text-sky-300">{buildingLabel}</span> •{" "}
+              <span className="font-semibold text-sky-300">{shiftLabel}</span> •{" "}
+              <span className="text-slate-300">{dateRange === "Custom" ? "Custom range" : dateRange}</span>
             </p>
             {dateRange === "Custom" && (
               <p className="mt-1 text-[11px] text-slate-500">
@@ -680,12 +815,25 @@ export default function ReportsPage() {
           </div>
 
           <div className="flex flex-col items-end gap-2 text-xs">
-            <Link
-              href="/"
-              className="mt-1 inline-flex items-center px-3 py-1 rounded-full border border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800"
-            >
-              ← Back to Dashboard
-            </Link>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={handleDownloadInvoicingCsv}
+                className="inline-flex items-center px-3 py-1.5 rounded-lg border border-emerald-700 bg-emerald-950/40 hover:bg-emerald-900/40 text-[11px] text-emerald-200"
+              >
+                Export Invoicing CSV
+              </button>
+
+              <Link
+                href="/"
+                className="inline-flex items-center px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800 text-[11px]"
+              >
+                ← Back to Dashboard
+              </Link>
+            </div>
+            <div className="text-[10px] text-slate-500">
+              Invoicing export = 1 row per container (date/building/shift/work order/pieces).
+            </div>
           </div>
         </div>
 
@@ -729,7 +877,7 @@ export default function ReportsPage() {
                 <select
                   className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2 text-slate-50"
                   value={shiftFilter}
-                  onChange={(e) => setShiftFilter(e.target.value as any)}
+                  onChange={(e) => setShiftFilter(e.target.value as (typeof SHIFT_OPTIONS)[number])}
                 >
                   {SHIFT_OPTIONS.map((s) => (
                     <option key={s} value={s}>
@@ -792,7 +940,7 @@ export default function ReportsPage() {
                     />
                   </div>
                   <div className="md:col-span-2 text-[11px] text-slate-500 flex items-center">
-                    Tip: pick a week (Sun–Sat) or any range, then download CSVs.
+                    Tip: Custom range uses exact YYYY-MM-DD comparisons (NY timezone safe).
                   </div>
                 </>
               )}

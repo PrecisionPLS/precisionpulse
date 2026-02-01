@@ -15,19 +15,21 @@ const CHATS_KEY = "precisionpulse_chats";
 const CONTAINERS_KEY = "precisionpulse_containers";
 const WORK_ORDERS_KEY = "precisionpulse_work_orders";
 
-// LocalStorage row types (kept flexible but NOT `any`)
 type LocalRow = Record<string, unknown>;
 
+const SHIFT_OPTIONS = ["ALL", "1st", "2nd", "3rd", "4th"] as const;
+type ShiftOption = (typeof SHIFT_OPTIONS)[number];
+
 /**
- * ✅ RULES
- * - Leads: NO containers page. (Entry is inside Work Orders)
- * - Building Managers: NO containers page OR tab. Yes Workforce (to manage their building workers)
+ * ✅ RULES (kept)
+ * - Leads: NO containers page. Entry is inside Work Orders
+ * - Building Managers: NO containers page/tab. Yes Workforce (their building)
  * - Super Admin: full admin nav
  * - HQ/Admin: normal nav (containers allowed)
- * - ✅ NEW: Worker History visible to everyone, scoped by building (Lead/BM)
+ * - Worker History visible to everyone, scoped by building (Lead/BM on that page)
  */
 
-// ✅ Non–Super Admins are only allowed to access these routes (client-side guard)
+// ✅ Non–Super Admin allowed routes
 const NON_SUPER_ALLOWED_ROUTES = new Set<string>([
   "/",
   "/work-orders",
@@ -36,11 +38,9 @@ const NON_SUPER_ALLOWED_ROUTES = new Set<string>([
   "/startup-checklists",
   "/chats",
   "/injury-report",
-  "/worker-history", // ✅ NEW
-  // NOTE: "/containers" stays allowed for non-super ONLY if they are HQ/Admin (handled in guard below)
+  "/worker-history",
 ]);
 
-// ✅ These are blocked routes if typed directly in the URL by non–Super Admin
 const NON_SUPER_BLOCKED_ROUTES = [
   "/shifts",
   "/staffing",
@@ -69,8 +69,18 @@ function getObjBuilding(obj: LocalRow): string | undefined {
     (typeof obj.building === "string" ? obj.building : undefined) ||
     (typeof obj.assignedBuilding === "string" ? obj.assignedBuilding : undefined) ||
     (typeof obj.homeBuilding === "string" ? obj.homeBuilding : undefined) ||
-    (typeof obj.buildingCode === "string" ? obj.buildingCode : undefined);
+    (typeof obj.buildingCode === "string" ? obj.buildingCode : undefined) ||
+    (typeof obj.dc === "string" ? obj.dc : undefined) ||
+    (typeof obj.location === "string" ? obj.location : undefined);
   return b;
+}
+
+function getObjShift(obj: LocalRow): string | undefined {
+  const s =
+    (typeof obj.shift === "string" ? obj.shift : undefined) ||
+    (typeof obj.shift_name === "string" ? obj.shift_name : undefined) ||
+    (typeof obj.shiftName === "string" ? obj.shiftName : undefined);
+  return s;
 }
 
 function getString(obj: LocalRow, key: string): string {
@@ -88,47 +98,204 @@ function getBoolRecordValues(obj: unknown): boolean[] {
   return Object.values(obj as Record<string, unknown>).filter((v): v is boolean => typeof v === "boolean");
 }
 
+/**
+ * IMPORTANT FIX:
+ * Minutes were often 0 because workers can store minutes under different keys.
+ * This makes PPH + charts correct.
+ */
+function getWorkerMinutesFromWorkerRecord(w: Record<string, unknown>): number {
+  const candidates = [w.minutesWorked, w.minutes, w.mins, w.timeMinutes, w.totalMinutes, w.minutes_worked];
+  for (const c of candidates) {
+    if (typeof c === "number" && !Number.isNaN(c)) return c;
+  }
+  if (typeof w.minutesWorked === "string") {
+    const n = Number(w.minutesWorked);
+    if (!Number.isNaN(n)) return n;
+  }
+  if (typeof w.minutes === "string") {
+    const n = Number(w.minutes);
+    if (!Number.isNaN(n)) return n;
+  }
+  return 0;
+}
+
 function getWorkersMinutes(row: LocalRow): number {
   const workersRaw = row.workers;
   if (!Array.isArray(workersRaw)) return 0;
 
   return workersRaw.reduce<number>((sum, w) => {
     if (!w || typeof w !== "object") return sum;
-    const mw = (w as Record<string, unknown>).minutesWorked;
-    return sum + (typeof mw === "number" ? mw : 0);
+    return sum + getWorkerMinutesFromWorkerRecord(w as Record<string, unknown>);
   }, 0);
+}
+
+function todayInNY(): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date()); // YYYY-MM-DD
+}
+
+function toDateOnlyISO(value: unknown): string {
+  if (typeof value !== "string") return "";
+  if (value.length >= 10) return value.slice(0, 10);
+  return value;
+}
+
+function getRowDateOnly(row: LocalRow): string {
+  const workDate =
+    (typeof row.work_date === "string" ? row.work_date : "") ||
+    (typeof row.workDate === "string" ? row.workDate : "") ||
+    (typeof row.date === "string" ? row.date : "");
+
+  const created =
+    (typeof row.createdAt === "string" ? row.createdAt : "") ||
+    (typeof row.created_at === "string" ? row.created_at : "") ||
+    (typeof row.timestamp === "string" ? row.timestamp : "") ||
+    (typeof row.savedAt === "string" ? row.savedAt : "");
+
+  const best = workDate || created;
+  return toDateOnlyISO(best);
+}
+
+function money(n: number): string {
+  return `$${Number(n || 0).toFixed(2)}`;
+}
+
+function clamp(n: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, n));
+}
+
+function addDaysISO(iso: string, days: number): string {
+  const [y, m, d] = iso.split("-").map((x) => Number(x));
+  const dt = new Date(y, (m || 1) - 1, d || 1);
+  dt.setDate(dt.getDate() + days);
+  const yy = dt.getFullYear();
+  const mm = String(dt.getMonth() + 1).padStart(2, "0");
+  const dd = String(dt.getDate()).padStart(2, "0");
+  return `${yy}-${mm}-${dd}`;
+}
+
+function inLastNDays(dateISO: string, n: number, todayISO: string): boolean {
+  if (!dateISO) return false;
+  const start = addDaysISO(todayISO, -(n - 1)); // inclusive
+  return dateISO >= start && dateISO <= todayISO;
+}
+
+/**
+ * ✅ KEY FIX: Containers may live INSIDE work orders
+ * This extracts container rows from each work order and normalizes them.
+ */
+function extractContainersFromWorkOrders(workOrders: LocalRow[]): LocalRow[] {
+  const out: LocalRow[] = [];
+
+  for (const wo of workOrders) {
+    const woId = String(wo.id ?? wo.workOrderId ?? wo.work_order_id ?? "");
+    const woName = (typeof wo.name === "string" ? wo.name : "") || (typeof wo.title === "string" ? wo.title : "");
+
+    // Common places you may be storing them:
+    const candidates = [
+      wo.containers,
+      wo.containerEntries,
+      wo.container_entries,
+      wo.entries,
+      wo.items,
+    ];
+
+    const list = candidates.find((c) => Array.isArray(c)) as unknown;
+
+    if (!Array.isArray(list)) continue;
+
+    for (const raw of list) {
+      if (!raw || typeof raw !== "object") continue;
+
+      const c = raw as LocalRow;
+
+      // Normalize: inherit building/shift from work order if container missing it
+      const merged: LocalRow = {
+        ...c,
+        workOrderId: (typeof c.workOrderId === "string" ? c.workOrderId : "") || woId,
+        workOrderName: (typeof c.workOrderName === "string" ? c.workOrderName : "") || woName,
+        building: (typeof c.building === "string" ? c.building : "") || (typeof wo.building === "string" ? wo.building : ""),
+        shift: (typeof c.shift === "string" ? c.shift : "") || (typeof wo.shift === "string" ? wo.shift : ""),
+      };
+
+      out.push(merged);
+    }
+  }
+
+  return out;
+}
+
+/**
+ * ✅ De-dupe containers so we don't double count if saved in two places.
+ * Uses (id) if present, otherwise uses a stable fingerprint.
+ */
+function dedupeContainers(rows: LocalRow[]): LocalRow[] {
+  const seen = new Set<string>();
+  const out: LocalRow[] = [];
+
+  for (const r of rows) {
+    const id =
+      (typeof r.id === "string" ? r.id : "") ||
+      (typeof r.containerId === "string" ? r.containerId : "") ||
+      (typeof r.container_id === "string" ? r.container_id : "");
+
+    const created =
+      (typeof r.createdAt === "string" ? r.createdAt : "") ||
+      (typeof r.created_at === "string" ? r.created_at : "") ||
+      (typeof r.timestamp === "string" ? r.timestamp : "");
+
+    const pieces =
+      (typeof r.piecesTotal === "number" ? r.piecesTotal : 0) ||
+      (typeof r.pieces_total === "number" ? r.pieces_total : 0) ||
+      (typeof r.total_pieces === "number" ? r.total_pieces : 0) ||
+      0;
+
+    const woId = (typeof r.workOrderId === "string" ? r.workOrderId : "") || "";
+    const fp = id ? `id:${id}` : `fp:${woId}|${created}|${pieces}`;
+
+    if (seen.has(fp)) continue;
+    seen.add(fp);
+    out.push(r);
+  }
+
+  return out;
 }
 
 export default function Page() {
   const router = useRouter();
   const currentUser = useCurrentUser();
 
-  const isSuperAdmin = currentUser?.accessRole === "Super Admin";
-  const isAdmin = currentUser?.accessRole === "Admin";
-  const isHQ = !!currentUser && ["Super Admin", "Admin", "HQ"].includes(currentUser.accessRole || "");
-
-  const isLead = currentUser?.accessRole === "Lead";
-  const isBuildingManager = currentUser?.accessRole === "Building Manager";
+  const role = currentUser?.accessRole || "";
+  const isSuperAdmin = role === "Super Admin";
+  const isLead = role === "Lead";
+  const isBuildingManager = role === "Building Manager";
+  const isHQ = !!currentUser && ["Super Admin", "Admin", "HQ"].includes(role);
 
   const userBuilding = currentUser?.building || "";
+  const userShiftRaw = (currentUser as unknown as Record<string, unknown>)?.shift;
+  const userShift = typeof userShiftRaw === "string" ? userShiftRaw : "";
 
-  // ✅ Containers are hidden for Leads + Building Managers
+  // ✅ Containers hidden for Leads + Building Managers
   const canSeeContainers = !(isLead || isBuildingManager);
 
-  // ✅ Workforce is visible/manageable for Building Managers + Super Admin
+  // ✅ Workforce only for Building Managers + Super Admin
   const canSeeWorkforce = isBuildingManager || isSuperAdmin;
 
-  // ✅ Worker History visible to everyone (scoped by building for Lead/BM on that page)
+  // ✅ Worker History visible to everyone
   const canSeeWorkerHistory = true;
 
-  // ✅ URL Guard:
+  // ✅ URL Guard (kept)
   useEffect(() => {
     if (!currentUser) return;
     if (isSuperAdmin) return;
 
     const path = typeof window !== "undefined" ? window.location.pathname : "/";
 
-    // ✅ Block containers for Leads + Building Managers (even if typed in URL)
+    // Block containers for Lead/BM even if typed
     if ((isLead || isBuildingManager) && (path === "/containers" || path.startsWith("/containers/"))) {
       router.replace("/work-orders");
       return;
@@ -141,9 +308,40 @@ export default function Page() {
     if (isBlocked) router.replace("/");
   }, [currentUser, isSuperAdmin, isLead, isBuildingManager, router, canSeeContainers]);
 
+  // Filters
   const [buildingFilter, setBuildingFilter] = useState<string>(() => {
     return isHQ ? "ALL" : userBuilding || "ALL";
   });
+
+  const [shiftFilter, setShiftFilter] = useState<ShiftOption>("ALL");
+
+  // ✅ Effective scope rules:
+  const effectiveBuilding = useMemo(() => {
+    if (isLead || isBuildingManager) return userBuilding || buildingFilter || "ALL";
+    return buildingFilter;
+  }, [isLead, isBuildingManager, userBuilding, buildingFilter]);
+
+  const effectiveShift = useMemo<ShiftOption>(() => {
+    if (isLead) {
+      const normalized = (userShift || "").trim();
+      if (SHIFT_OPTIONS.includes(normalized as ShiftOption)) return normalized as ShiftOption;
+      return "ALL";
+    }
+    return shiftFilter;
+  }, [isLead, userShift, shiftFilter]);
+
+  const matchesScope = useCallback(
+    (obj: LocalRow): boolean => {
+      const b = getObjBuilding(obj) || "";
+      const s = getObjShift(obj) || "";
+
+      const buildingOk = effectiveBuilding === "ALL" ? true : b === effectiveBuilding;
+      const shiftOk = effectiveShift === "ALL" ? true : s === effectiveShift;
+
+      return buildingOk && shiftOk;
+    },
+    [effectiveBuilding, effectiveShift]
+  );
 
   // ✅ Initialize from localStorage
   const [workforce, setWorkforce] = useState<LocalRow[]>(() => safeReadArray(WORKFORCE_KEY));
@@ -172,25 +370,106 @@ export default function Page() {
     return () => window.removeEventListener("storage", onStorage);
   }, []);
 
-  const todayStr = new Date().toISOString().slice(0, 10);
+  // ✅ Correct today (NY)
+  const todayStr = useMemo(() => todayInNY(), []);
 
-  const matchesBuilding = useCallback(
-    (obj: LocalRow): boolean => {
-      if (buildingFilter === "ALL") return true;
-      const b = getObjBuilding(obj);
-      return b === buildingFilter;
-    },
-    [buildingFilter]
-  );
+  /**
+   * ✅ BIG FIX: Build a single “source of truth” for container rows:
+   * - standalone containers
+   * - containers nested inside work orders
+   */
+  const allContainers = useMemo(() => {
+    const fromWO = extractContainersFromWorkOrders(workOrders);
+    const merged = [...containers, ...fromWO];
+    return dedupeContainers(merged);
+  }, [containers, workOrders]);
+
+  // Trend (30-day arrays) using scoped rows
+  const trend = useMemo(() => {
+    const contAll = allContainers.filter(matchesScope);
+
+    const days: { date: string; containers: number; pieces: number; minutes: number; pph: number }[] = [];
+    for (let i = 29; i >= 0; i--) {
+      const d = addDaysISO(todayStr, -i);
+      days.push({ date: d, containers: 0, pieces: 0, minutes: 0, pph: 0 });
+    }
+    const idx = new Map<string, number>();
+    days.forEach((d, i) => idx.set(d.date, i));
+
+    for (const c of contAll) {
+      const d = getRowDateOnly(c);
+      if (!d) continue;
+      const i = idx.get(d);
+      if (i === undefined) continue;
+
+      days[i].containers += 1;
+
+      const pieces =
+        getNumber(c, "piecesTotal") ||
+        getNumber(c, "pieces_total") ||
+        getNumber(c, "total_pieces") ||
+        0;
+      days[i].pieces += pieces;
+
+      const minutes = getWorkersMinutes(c);
+      days[i].minutes += minutes;
+    }
+
+    for (const d of days) {
+      d.pph = d.minutes === 0 ? 0 : (d.pieces * 60) / d.minutes;
+    }
+
+    const last7 = days.slice(-7);
+    const last30 = days.slice(-30);
+    const today = days[days.length - 1];
+
+    const sum = (arr: typeof days, key: keyof (typeof days)[number]) =>
+      arr.reduce((s, r) => s + (Number(r[key]) || 0), 0);
+
+    const todayAgg = {
+      containers: today?.containers || 0,
+      pieces: today?.pieces || 0,
+      minutes: today?.minutes || 0,
+      pph: today?.pph || 0,
+    };
+
+    const last7Agg = {
+      containers: sum(last7, "containers"),
+      pieces: sum(last7, "pieces"),
+      minutes: sum(last7, "minutes"),
+      pph: sum(last7, "minutes") === 0 ? 0 : (sum(last7, "pieces") * 60) / sum(last7, "minutes"),
+    };
+
+    const last30Agg = {
+      containers: sum(last30, "containers"),
+      pieces: sum(last30, "pieces"),
+      minutes: sum(last30, "minutes"),
+      pph: sum(last30, "minutes") === 0 ? 0 : (sum(last30, "pieces") * 60) / sum(last30, "minutes"),
+    };
+
+    const maxContainers = Math.max(1, ...days.map((d) => d.containers));
+    const maxPieces = Math.max(1, ...days.map((d) => d.pieces));
+    const maxPPH = Math.max(1, ...days.map((d) => d.pph));
+
+    const anyData =
+      days.some((d) => d.containers > 0) ||
+      days.some((d) => d.pieces > 0) ||
+      days.some((d) => d.minutes > 0);
+
+    return { days, todayAgg, last7Agg, last30Agg, maxContainers, maxPieces, maxPPH, anyData };
+  }, [allContainers, matchesScope, todayStr]);
 
   const metrics = useMemo(() => {
-    const wf = workforce.filter(matchesBuilding);
-    const term = terminations.filter(matchesBuilding);
-    const dmg = damageReports.filter(matchesBuilding);
-    const startup = startupChecklists.filter(matchesBuilding);
-    const chatAll = chats.filter(matchesBuilding);
-    const contAll = containers.filter(matchesBuilding);
-    const wo = workOrders.filter(matchesBuilding);
+    const wf = workforce.filter(matchesScope);
+    const term = terminations.filter(matchesScope);
+    const dmg = damageReports.filter(matchesScope);
+    const startup = startupChecklists.filter(matchesScope);
+    const chatAll = chats.filter(matchesScope);
+
+    // ✅ Use merged container source
+    const contAll = allContainers.filter(matchesScope);
+
+    const wo = workOrders.filter(matchesScope);
 
     const totalWorkers = wf.length;
     const activeWorkers = wf.filter((w) => getString(w, "status") === "Active").length;
@@ -216,36 +495,63 @@ export default function Page() {
 
     const totalPiecesDamage = dmg.reduce<number>((sum, r) => sum + getNumber(r, "piecesTotal"), 0);
     const totalDamaged = dmg.reduce<number>((sum, r) => sum + getNumber(r, "piecesDamaged"), 0);
-
     const avgDamagePercent = totalPiecesDamage === 0 ? 0 : Math.round((totalDamaged / totalPiecesDamage) * 100);
 
-    const startupToday = startup.filter((r) => getString(r, "date") === todayStr);
+    // Startup today (NY)
+    const startupToday = startup.filter((r) => toDateOnlyISO(getString(r, "date")) === todayStr);
     const startupTodayTotal = startupToday.length;
-
     const startupTodayCompleted = startupToday.filter((r) => {
       const vals = getBoolRecordValues(r.items);
       return vals.length > 0 && vals.every(Boolean);
     }).length;
 
-    const chatsToday = chatAll.filter((m) => getString(m, "createdAt").startsWith(todayStr));
+    // Chats today
+    const chatsToday = chatAll.filter((m) => toDateOnlyISO(getString(m, "createdAt")) === todayStr);
     const chatsTodayCount = chatsToday.length;
 
-    // Containers & throughput
-    const containersTotal = contAll.length;
+    // Work orders
     const workOrdersTotal = wo.length;
     const workOrdersOpen = wo.filter((item) => {
       const s = getString(item, "status");
       return s === "Pending" || s === "Active";
     }).length;
 
-    const contToday = contAll.filter((c) => getString(c, "createdAt").startsWith(todayStr));
-
+    // Containers today
+    const contToday = contAll.filter((c) => getRowDateOnly(c) === todayStr);
     const containersToday = contToday.length;
-    const piecesToday = contToday.reduce<number>((sum, c) => sum + getNumber(c, "piecesTotal"), 0);
+
+    const piecesToday = contToday.reduce<number>((sum, c) => {
+      const pieces =
+        getNumber(c, "piecesTotal") ||
+        getNumber(c, "pieces_total") ||
+        getNumber(c, "total_pieces") ||
+        0;
+      return sum + pieces;
+    }, 0);
 
     const minutesToday = contToday.reduce<number>((sum, c) => sum + getWorkersMinutes(c), 0);
-
     const pphToday = minutesToday === 0 ? 0 : (piecesToday * 60) / minutesToday;
+
+    // Coverage signal (last 7 days)
+    const last7 = contAll.filter((c) => {
+      const d = getRowDateOnly(c);
+      return inLastNDays(d, 7, todayStr);
+    });
+    const uniqueDays = new Set(last7.map((c) => getRowDateOnly(c)).filter(Boolean));
+    const last7CoverageDays = uniqueDays.size;
+
+    // Freshness
+    const lastSeen = contAll
+      .map((c) => {
+        const t =
+          (typeof c.createdAt === "string" ? c.createdAt : "") ||
+          (typeof c.created_at === "string" ? c.created_at : "") ||
+          (typeof c.timestamp === "string" ? c.timestamp : "");
+        return t;
+      })
+      .filter(Boolean)
+      .sort()
+      .slice(-1)[0];
 
     return {
       totalWorkers,
@@ -258,13 +564,15 @@ export default function Page() {
       startupTodayTotal,
       startupTodayCompleted,
       chatsTodayCount,
-      containersTotal,
+      containersTotal: contAll.length,
       workOrdersTotal,
       workOrdersOpen,
       containersToday,
       piecesToday,
       minutesToday,
       pphToday,
+      last7CoverageDays,
+      lastSeen,
     };
   }, [
     workforce,
@@ -272,13 +580,116 @@ export default function Page() {
     damageReports,
     startupChecklists,
     chats,
-    containers,
+    allContainers,
     workOrders,
     todayStr,
-    matchesBuilding,
+    matchesScope,
   ]);
 
-  const buildingLabel = buildingFilter === "ALL" ? "All Buildings" : buildingFilter;
+  const buildingLabel = effectiveBuilding === "ALL" ? "All Buildings" : effectiveBuilding;
+  const shiftLabel = effectiveShift === "ALL" ? "All Shifts" : effectiveShift;
+
+  // Insights (Top Work Orders + Top Workers) last 7 days, scoped
+  const insights = useMemo(() => {
+    const contAll = allContainers.filter(matchesScope);
+
+    const woById = new Map<string, string>();
+    for (const w of workOrders) {
+      const id = String(w.id ?? "");
+      const name = getString(w, "name");
+      if (id) woById.set(id, name || id);
+    }
+
+    const woAgg = new Map<string, { workOrder: string; containers: number; pieces: number; payTotal: number }>();
+
+    for (const c of contAll) {
+      const d = getRowDateOnly(c);
+      if (!inLastNDays(d, 7, todayStr)) continue;
+
+      const woId =
+        (typeof c.workOrderId === "string" ? c.workOrderId : "") ||
+        (typeof c.work_order_id === "string" ? c.work_order_id : "") ||
+        "";
+
+      const label =
+        woId ? woById.get(woId) || woId : (typeof c.workOrderName === "string" ? c.workOrderName : "") || "Unassigned";
+
+      const key = label;
+
+      if (!woAgg.has(key)) woAgg.set(key, { workOrder: label, containers: 0, pieces: 0, payTotal: 0 });
+
+      const row = woAgg.get(key)!;
+      row.containers += 1;
+
+      const pieces =
+        getNumber(c, "piecesTotal") ||
+        getNumber(c, "pieces_total") ||
+        getNumber(c, "total_pieces") ||
+        0;
+      row.pieces += pieces;
+
+      const pay =
+        getNumber(c, "containerPayTotal") ||
+        getNumber(c, "pay_total") ||
+        getNumber(c, "container_pay_total") ||
+        0;
+      row.payTotal += pay;
+    }
+
+    const topWorkOrders = Array.from(woAgg.values())
+      .sort((a, b) => b.containers - a.containers || b.pieces - a.pieces)
+      .slice(0, 6);
+
+    const workerAgg = new Map<string, { worker: string; payout: number; minutes: number; containers: number }>();
+
+    for (const c of contAll) {
+      const d = getRowDateOnly(c);
+      if (!inLastNDays(d, 7, todayStr)) continue;
+
+      const workersRaw = c.workers;
+      if (!Array.isArray(workersRaw)) continue;
+
+      const seenInThisContainer = new Set<string>();
+
+      for (const w of workersRaw) {
+        if (!w || typeof w !== "object") continue;
+        const rec = w as Record<string, unknown>;
+        const name =
+          (typeof rec.name === "string" ? rec.name : "") ||
+          (typeof rec.workerName === "string" ? rec.workerName : "") ||
+          (typeof rec.fullName === "string" ? rec.fullName : "");
+
+        const worker = String(name || "Unknown").trim();
+        if (!worker) continue;
+
+        const key = worker.toLowerCase();
+        if (!workerAgg.has(key)) workerAgg.set(key, { worker, payout: 0, minutes: 0, containers: 0 });
+
+        const entry = workerAgg.get(key)!;
+
+        const payout =
+          (typeof rec.payout === "number" ? rec.payout : 0) ||
+          (typeof rec.payoutAmount === "number" ? rec.payoutAmount : 0) ||
+          (typeof rec.pay === "number" ? rec.pay : 0);
+
+        const minutes = getWorkerMinutesFromWorkerRecord(rec);
+
+        entry.payout += payout;
+        entry.minutes += minutes;
+
+        if (!seenInThisContainer.has(key)) {
+          entry.containers += 1;
+          seenInThisContainer.add(key);
+        }
+      }
+    }
+
+    const topWorkers = Array.from(workerAgg.values())
+      .sort((a, b) => b.payout - a.payout)
+      .slice(0, 6);
+
+    return { topWorkOrders, topWorkers };
+  }, [allContainers, workOrders, matchesScope, todayStr]);
 
   async function handleLogout() {
     try {
@@ -318,8 +729,11 @@ export default function Page() {
             <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-3">
               <div className="text-[11px] text-slate-300 font-semibold">Lead Entry</div>
               <div className="text-[11px] text-slate-500 mt-1 leading-relaxed">
-                Enter containers <span className="text-sky-300 font-semibold">inside Work Orders</span> to avoid
-                duplicates.
+                Enter containers <span className="text-sky-300 font-semibold">inside Work Orders</span> to avoid duplicates.
+              </div>
+              <div className="mt-2 text-[10px] text-slate-500">
+                Scope: <span className="text-slate-200">{buildingLabel}</span> •{" "}
+                <span className="text-slate-200">{shiftLabel}</span>
               </div>
               <Link
                 href="/work-orders"
@@ -328,7 +742,6 @@ export default function Page() {
                 Go to Work Orders →
               </Link>
 
-              {/* ✅ NEW: Worker History quick link */}
               {canSeeWorkerHistory && (
                 <Link
                   href="/worker-history"
@@ -343,7 +756,7 @@ export default function Page() {
               <div className="text-[11px] text-slate-300 font-semibold">Building Manager</div>
               <div className="text-[11px] text-slate-500 mt-1 leading-relaxed">
                 Manage work orders and workforce for{" "}
-                <span className="text-sky-300 font-semibold">{currentUser.building}</span>.
+                <span className="text-sky-300 font-semibold">{buildingLabel}</span>.
               </div>
               <div className="mt-2 flex flex-wrap gap-2">
                 <Link
@@ -369,7 +782,6 @@ export default function Page() {
                   Injury Report →
                 </Link>
 
-                {/* ✅ NEW */}
                 {canSeeWorkerHistory && (
                   <Link
                     href="/worker-history"
@@ -394,7 +806,6 @@ export default function Page() {
                   Work Orders →
                 </Link>
 
-                {/* ✅ Containers shortcut hidden for Leads + Building Managers */}
                 {canSeeContainers && (
                   <Link
                     href="/containers"
@@ -411,7 +822,6 @@ export default function Page() {
                   Injury Report →
                 </Link>
 
-                {/* ✅ NEW */}
                 {canSeeWorkerHistory && (
                   <Link
                     href="/worker-history"
@@ -433,22 +843,18 @@ export default function Page() {
 
               <NavItem href="/work-orders">Work Orders</NavItem>
 
-              {/* ✅ Hide Containers nav for Leads + Building Managers */}
               {canSeeContainers && <NavItem href="/containers">Containers</NavItem>}
 
-              {/* ✅ Workforce nav ONLY for Building Managers (and Super Admin if you want) */}
               {canSeeWorkforce && <NavItem href="/workforce">Workforce</NavItem>}
 
-              {/* ✅ Injury Report visible to everyone */}
               <NavItem href="/injury-report">Injury Report</NavItem>
 
-              {/* ✅ NEW: Worker History visible to everyone */}
               {canSeeWorkerHistory && <NavItem href="/worker-history">Worker History</NavItem>}
 
               <div className="pt-2 mt-2 border-t border-slate-800/80">
                 <div className="text-[10px] uppercase tracking-wide text-slate-600 mb-2">Operations</div>
                 <NavItem href="/damage-reports">Damage Reports</NavItem>
-                <NavItem href="/startup-checklists">Startup Meetings</NavItem>
+                <NavItem href="/startup-checklists">Shift Readiness Reports</NavItem>
                 <NavItem href="/training">Training</NavItem>
                 <NavItem href="/chats">Chats</NavItem>
               </div>
@@ -483,6 +889,7 @@ export default function Page() {
                 </div>
                 <div className="text-[10px] text-slate-500 truncate">
                   {currentUser.email} · {currentUser.building || "No building set"}
+                  {isLead && userShift ? ` · ${userShift}` : ""}
                 </div>
               </div>
               <button
@@ -498,31 +905,43 @@ export default function Page() {
         {/* MAIN DASHBOARD */}
         <main className="flex-1 p-6 space-y-6">
           {/* Header */}
-          <div className="flex flex-col gap-3">
-            <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-3">
+          <div className="rounded-3xl border border-slate-800 bg-gradient-to-br from-slate-900/80 via-slate-900/40 to-slate-950 p-6 shadow-sm shadow-slate-900/60">
+            <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
               <div className="space-y-1">
                 <h1 className="text-2xl font-semibold text-slate-50">Dashboard</h1>
                 <p className="text-sm text-slate-400">
-                  Live overview across <span className="font-semibold text-sky-300">{buildingLabel}</span>.
+                  Live overview • <span className="font-semibold text-sky-300">{buildingLabel}</span> •{" "}
+                  <span className="font-semibold text-sky-300">{shiftLabel}</span>
                 </p>
 
-                {(isLead || isBuildingManager) && currentUser.building && (
-                  <p className="text-[11px] text-slate-500">
-                    Access is restricted to{" "}
-                    <span className="font-semibold text-sky-300">{currentUser.building}</span>.
-                  </p>
-                )}
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <Pill subtle>
+                    Timezone: <span className="ml-1 text-slate-200">America/New_York</span>
+                  </Pill>
+                  <Pill subtle>
+                    Today: <span className="ml-1 font-mono text-slate-200">{todayStr}</span>
+                  </Pill>
+                  <Pill subtle>
+                    Last 7-day coverage:{" "}
+                    <span className="ml-1 text-sky-300 font-semibold">{metrics.last7CoverageDays}/7</span>
+                  </Pill>
+                  {metrics.lastSeen ? (
+                    <Pill subtle>
+                      Last container saved:{" "}
+                      <span className="ml-1 font-mono text-slate-200">{String(metrics.lastSeen).slice(0, 19)}</span>
+                    </Pill>
+                  ) : (
+                    <Pill subtle>No container timestamps found</Pill>
+                  )}
+                </div>
               </div>
 
-              <div className="flex flex-wrap items-center gap-2">
-                <Pill>
-                  Today: <span className="font-mono text-slate-200">{todayStr}</span>
-                </Pill>
-
+              {/* Filters */}
+              <div className="flex flex-wrap items-center gap-3">
                 <div className="flex items-center gap-2">
-                  <span className="text-[11px] text-slate-500">View:</span>
+                  <span className="text-[11px] text-slate-500">Building:</span>
                   <select
-                    className="rounded-lg bg-slate-900 border border-slate-700 px-3 py-1.5 text-xs text-slate-50 shadow-sm shadow-slate-900/50"
+                    className="rounded-lg bg-slate-900/80 border border-slate-700 px-3 py-1.5 text-xs text-slate-50 shadow-sm shadow-slate-900/50"
                     value={buildingFilter}
                     onChange={(e) => setBuildingFilter(e.target.value)}
                     disabled={!isHQ && !!userBuilding}
@@ -538,11 +957,27 @@ export default function Page() {
                     })}
                   </select>
                 </div>
+
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] text-slate-500">Shift:</span>
+                  <select
+                    className="rounded-lg bg-slate-900/80 border border-slate-700 px-3 py-1.5 text-xs text-slate-50 shadow-sm shadow-slate-900/50"
+                    value={shiftFilter}
+                    onChange={(e) => setShiftFilter(e.target.value as ShiftOption)}
+                    disabled={isLead}
+                  >
+                    {SHIFT_OPTIONS.map((s) => (
+                      <option key={s} value={s}>
+                        {s === "ALL" ? "All Shifts" : s}
+                      </option>
+                    ))}
+                  </select>
+                </div>
               </div>
             </div>
 
             {/* Quick Actions */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div className="mt-5 grid grid-cols-1 md:grid-cols-3 gap-3">
               <ActionCard
                 title="Enter Work"
                 desc={isLead ? "Add containers inside a work order (recommended)." : "Create work orders and add containers."}
@@ -550,7 +985,6 @@ export default function Page() {
                 cta="Open Work Orders →"
               />
 
-              {/* ✅ Containers action card removed for Building Managers + Leads */}
               {canSeeContainers ? (
                 <ActionCard
                   title="Review Containers"
@@ -567,7 +1001,6 @@ export default function Page() {
                 />
               )}
 
-              {/* Injury Report */}
               <ActionCard
                 title="Injury Report"
                 desc="Report injuries, attach documents, and print forms for signatures."
@@ -576,8 +1009,7 @@ export default function Page() {
               />
             </div>
 
-            {/* ✅ NEW row: Worker History action card */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-3">
               <ActionCard
                 title="Worker History"
                 desc="Click a worker to see every container they worked and earnings by container."
@@ -626,151 +1058,144 @@ export default function Page() {
             />
           </div>
 
-          {/* Two-column content */}
+          {/* Trends + Highlights */}
           <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-            {/* Left */}
-            <Panel className="xl:col-span-1 space-y-4">
-              <div className="flex items-end justify-between">
-                <div>
-                  <h2 className="text-sm font-semibold text-slate-100">Operations Snapshot</h2>
-                  <p className="text-[11px] text-slate-500">Containers • Work Orders • Throughput</p>
-                </div>
-                <Pill subtle>{buildingLabel}</Pill>
-              </div>
-
-              <div className="grid grid-cols-1 gap-3">
-                <MiniStat
-                  title="Work Orders (Open)"
-                  value={`${metrics.workOrdersOpen}`}
-                  sub={`Total: ${metrics.workOrdersTotal}`}
-                  href="/work-orders"
-                  link="Go to Work Orders →"
-                />
-
-                {/* ✅ Never link to /containers for Leads or Building Managers */}
-                <MiniStat
-                  title="Total Containers"
-                  value={`${metrics.containersTotal}`}
-                  sub={`Today: ${metrics.containersToday} · Pieces: ${metrics.piecesToday}`}
-                  href="/work-orders"
-                  link="Go to Work Orders →"
-                />
-
-                <MiniStat
-                  title="Throughput Today"
-                  value={`${metrics.pphToday.toFixed(1)} PPH`}
-                  sub={`Minutes logged: ${metrics.minutesToday}`}
-                  href={isSuperAdmin ? "/reports" : "/"}
-                  link="See details →"
-                />
-
-                <MiniStat
-                  title="Startup Meetings Today"
-                  value={`${metrics.startupTodayCompleted}/${metrics.startupTodayTotal} completed`}
-                  sub={buildingLabel}
-                  href="/startup-checklists"
-                  link="View Checklists →"
-                />
-              </div>
-            </Panel>
-
-            {/* Right */}
             <Panel className="xl:col-span-2 space-y-4">
               <div className="flex items-end justify-between">
                 <div>
-                  <h2 className="text-sm font-semibold text-slate-100">People & Compliance</h2>
-                  <p className="text-[11px] text-slate-500">Workforce · Training · HR</p>
+                  <h2 className="text-sm font-semibold text-slate-100">Performance Trends</h2>
+                  <p className="text-[11px] text-slate-500">Last 30 days • Containers • Pieces • PPH</p>
                 </div>
-                <div className="hidden md:flex gap-2">
-                  <Pill subtle>Active: {metrics.activeWorkers}</Pill>
-                  <Pill subtle>Open Damage: {metrics.openDamageReports}</Pill>
-                </div>
+                <Pill subtle>
+                  {buildingLabel} • {shiftLabel}
+                </Pill>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
-                <MiniCard>
-                  <div className="text-slate-300 mb-1 font-semibold">Workforce</div>
-                  <div className="text-slate-400">
-                    Active: <span className="text-emerald-300">{metrics.activeWorkers}</span>
-                  </div>
-                  <div className="text-slate-400">
-                    Total: <span className="text-slate-100">{metrics.totalWorkers}</span>
-                  </div>
-                  {canSeeWorkforce && (
-                    <Link href="/workforce" className="mt-2 inline-block text-[11px] text-sky-300 hover:underline">
-                      Manage Workforce →
-                    </Link>
-                  )}
-                </MiniCard>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <TrendStat
+                  title="Containers"
+                  today={trend.todayAgg.containers}
+                  last7={trend.last7Agg.containers}
+                  last30={trend.last30Agg.containers}
+                  hint="Count of containers logged"
+                />
+                <TrendStat
+                  title="Pieces"
+                  today={trend.todayAgg.pieces}
+                  last7={trend.last7Agg.pieces}
+                  last30={trend.last30Agg.pieces}
+                  hint="Total pieces from container entries"
+                />
+                <TrendStat
+                  title="PPH"
+                  today={Number(trend.todayAgg.pph.toFixed(1))}
+                  last7={Number(trend.last7Agg.pph.toFixed(1))}
+                  last30={Number(trend.last30Agg.pph.toFixed(1))}
+                  hint="Pieces per hour (pieces*60 / minutes)"
+                />
+              </div>
 
-                <MiniCard>
-                  <div className="text-slate-300 mb-1 font-semibold">Terminations</div>
-                  <div className="text-slate-400">
-                    In Progress: <span className="text-rose-300">{metrics.termInProgress}</span>
+              {!trend.anyData ? (
+                <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4">
+                  <div className="text-[12px] text-slate-200 font-semibold">No chart data found in the last 30 days</div>
+                  <div className="text-[11px] text-slate-500 mt-1 leading-relaxed">
+                    If you KNOW containers exist, it usually means they are stored inside Work Orders. This dashboard now reads both
+                    sources, so refresh and try again. Also confirm containers have a timestamp (createdAt/work_date).
                   </div>
-                  <div className="text-slate-400">
-                    Completed: <span className="text-emerald-300">{metrics.termCompleted}</span>
-                  </div>
-                  {isSuperAdmin && (
-                    <Link href="/terminations" className="mt-2 inline-block text-[11px] text-sky-300 hover:underline">
-                      View Terminations →
-                    </Link>
-                  )}
-                </MiniCard>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 gap-3">
+                  <MiniChart
+                    title="Containers (30 days)"
+                    subtitle="Daily container volume"
+                    series={trend.days.map((d) => d.containers)}
+                    labels={trend.days.map((d) => d.date.slice(5))}
+                    max={trend.maxContainers}
+                  />
+                  <MiniChart
+                    title="Pieces (30 days)"
+                    subtitle="Daily piece volume"
+                    series={trend.days.map((d) => d.pieces)}
+                    labels={trend.days.map((d) => d.date.slice(5))}
+                    max={trend.maxPieces}
+                  />
+                  <MiniChart
+                    title="PPH (30 days)"
+                    subtitle="Daily throughput efficiency"
+                    series={trend.days.map((d) => Number(d.pph.toFixed(1)))}
+                    labels={trend.days.map((d) => d.date.slice(5))}
+                    max={trend.maxPPH}
+                  />
+                </div>
+              )}
+            </Panel>
 
-                <MiniCard>
-                  <div className="text-slate-300 mb-1 font-semibold">Training</div>
-                  <div className="text-slate-400">Compliance matrix + readiness.</div>
-                  <Link href="/training" className="mt-2 inline-block text-[11px] text-sky-300 hover:underline">
-                    Go to Training →
-                  </Link>
-                </MiniCard>
+            <Panel className="xl:col-span-1 space-y-4">
+              <div className="flex items-end justify-between">
+                <div>
+                  <h2 className="text-sm font-semibold text-slate-100">Weekly Highlights</h2>
+                  <p className="text-[11px] text-slate-500">Top Work Orders & Workers (7 days)</p>
+                </div>
+                <Pill subtle>Last 7</Pill>
               </div>
 
               <MiniCard>
-                <div className="flex items-center justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="text-slate-300 mb-1 font-semibold">Injury Reporting</div>
-                    <div className="text-slate-400 text-[11px] leading-relaxed">
-                      Report incidents, upload documents, and print signature forms — scoped by building.
-                    </div>
+                <div className="text-slate-300 mb-2 font-semibold">Top Work Orders</div>
+                {insights.topWorkOrders.length === 0 ? (
+                  <div className="text-[11px] text-slate-500">No work order activity in the last 7 days.</div>
+                ) : (
+                  <div className="space-y-2">
+                    {insights.topWorkOrders.map((w) => (
+                      <div key={w.workOrder} className="flex items-center justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="text-[12px] text-slate-100 truncate">{w.workOrder}</div>
+                          <div className="text-[10px] text-slate-500">
+                            {w.containers} containers • {w.pieces.toLocaleString()} pieces
+                          </div>
+                        </div>
+                        <div className="text-[11px] text-emerald-300 shrink-0">{money(w.payTotal)}</div>
+                      </div>
+                    ))}
                   </div>
-                  <Link href="/injury-report" className="text-[11px] text-sky-300 hover:underline shrink-0">
-                    Open →
-                  </Link>
-                </div>
-              </MiniCard>
-
-              {/* ✅ NEW: Worker History card */}
-              <MiniCard>
-                <div className="flex items-center justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="text-slate-300 mb-1 font-semibold">Worker History</div>
-                    <div className="text-slate-400 text-[11px] leading-relaxed">
-                      View each worker’s containers and earnings breakdown (read-only).
-                    </div>
-                  </div>
-                  <Link href="/worker-history" className="text-[11px] text-sky-300 hover:underline shrink-0">
-                    Open →
-                  </Link>
-                </div>
+                )}
+                <Link href="/work-orders" className="mt-3 inline-block text-[11px] text-sky-300 hover:underline">
+                  Open Work Orders →
+                </Link>
               </MiniCard>
 
               <MiniCard>
-                <div className="flex items-center justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="text-slate-300 mb-1 font-semibold">Quality & Damage</div>
-                    <div className="text-slate-400 text-[11px] leading-relaxed">
-                      Open/Review: <span className="text-amber-300">{metrics.openDamageReports}</span> · Total:{" "}
-                      <span className="text-slate-100">{metrics.totalDamageReports}</span> · Avg Damage:{" "}
-                      <span className="text-amber-300">{metrics.avgDamagePercent}%</span>
-                    </div>
+                <div className="text-slate-300 mb-2 font-semibold">Top Workers (by payout)</div>
+                {insights.topWorkers.length === 0 ? (
+                  <div className="text-[11px] text-slate-500">No worker payout activity in the last 7 days.</div>
+                ) : (
+                  <div className="space-y-2">
+                    {insights.topWorkers.map((w) => (
+                      <div key={w.worker} className="flex items-center justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="text-[12px] text-slate-100 truncate">{w.worker}</div>
+                          <div className="text-[10px] text-slate-500">
+                            {w.containers} containers • {w.minutes} minutes
+                          </div>
+                        </div>
+                        <div className="text-[11px] text-sky-300 font-semibold shrink-0">{money(w.payout)}</div>
+                      </div>
+                    ))}
                   </div>
-                  <Link href="/damage-reports" className="text-[11px] text-sky-300 hover:underline shrink-0">
-                    Open →
-                  </Link>
-                </div>
+                )}
+                <Link href="/worker-history" className="mt-3 inline-block text-[11px] text-sky-300 hover:underline">
+                  Open Worker History →
+                </Link>
               </MiniCard>
+
+              {metrics.last7CoverageDays < 7 && (
+                <div className="rounded-xl border border-amber-700/60 bg-amber-950/30 p-3">
+                  <div className="text-[11px] text-amber-200 font-semibold">Coverage warning</div>
+                  <div className="text-[11px] text-amber-100/80 mt-1 leading-relaxed">
+                    Only <span className="font-semibold">{metrics.last7CoverageDays}</span> of the last 7 days have container entries in this view.
+                    If you expected daily entries, check Work Orders for missing logs.
+                  </div>
+                </div>
+              )}
             </Panel>
           </div>
         </main>
@@ -827,16 +1252,12 @@ function Panel({ children, className = "" }: { children: React.ReactNode; classN
 }
 
 function MiniCard({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="rounded-xl bg-slate-950 border border-slate-800 p-4 shadow-sm shadow-slate-900/40">
-      {children}
-    </div>
-  );
+  return <div className="rounded-xl bg-slate-950 border border-slate-800 p-4 shadow-sm shadow-slate-900/40">{children}</div>;
 }
 
 function ActionCard({ title, desc, href, cta }: { title: string; desc: string; href: string; cta: string }) {
   return (
-    <div className="rounded-2xl bg-slate-900 border border-slate-800 p-4 shadow-sm shadow-slate-900/40">
+    <div className="rounded-2xl bg-slate-900 border border-slate-800 p-4 shadow-sm shadow-slate-900/40 hover:shadow-lg hover:shadow-slate-900/70 transition-shadow">
       <div className="text-sm font-semibold text-slate-100">{title}</div>
       <div className="mt-1 text-[11px] text-slate-500 leading-relaxed">{desc}</div>
       <Link
@@ -875,7 +1296,7 @@ function KpiCard({
       : "text-sky-300";
 
   return (
-    <div className="rounded-2xl bg-slate-900 border border-slate-800 p-4 shadow-sm shadow-slate-900/50 hover:shadow-lg hover:shadow-slate-900/70 transition-shadow">
+    <div className="rounded-2xl bg-gradient-to-br from-slate-900/90 to-slate-950 border border-slate-800 p-4 shadow-sm shadow-slate-900/50 hover:shadow-lg hover:shadow-slate-900/70 transition-shadow">
       <div className="text-xs text-slate-400">{label}</div>
       <div className={`mt-1 text-2xl font-semibold ${valueColor}`}>{value}</div>
       <div className="mt-1 text-[11px] text-slate-500">{sub}</div>
@@ -888,31 +1309,126 @@ function KpiCard({
   );
 }
 
-function MiniStat({
+function TrendStat({
   title,
-  value,
-  sub,
-  href,
-  link,
+  today,
+  last7,
+  last30,
+  hint,
 }: {
   title: string;
-  value: string;
-  sub: string;
-  href: string;
-  link: string;
+  today: number;
+  last7: number;
+  last30: number;
+  hint: string;
 }) {
   return (
     <div className="rounded-xl bg-slate-950 border border-slate-800 p-4 shadow-sm shadow-slate-900/40">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="text-[11px] text-slate-400">{title}</div>
-          <div className="mt-1 text-lg font-semibold text-slate-100">{value}</div>
-          <div className="mt-1 text-[11px] text-slate-500">{sub}</div>
+      <div className="text-[11px] text-slate-400">{title}</div>
+      <div className="mt-1 text-lg font-semibold text-slate-100">{Number(today).toLocaleString()}</div>
+      <div className="mt-1 text-[10px] text-slate-500">{hint}</div>
+      <div className="mt-3 grid grid-cols-2 gap-2 text-[10px] text-slate-400">
+        <div className="rounded-lg border border-slate-800 bg-slate-900/40 px-2 py-1">
+          <div className="text-slate-500">Last 7</div>
+          <div className="text-slate-200 font-semibold">{Number(last7).toLocaleString()}</div>
         </div>
-        <Link href={href} className="text-[11px] text-sky-300 hover:underline shrink-0">
-          {link}
-        </Link>
+        <div className="rounded-lg border border-slate-800 bg-slate-900/40 px-2 py-1">
+          <div className="text-slate-500">Last 30</div>
+          <div className="text-slate-200 font-semibold">{Number(last30).toLocaleString()}</div>
+        </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * ✅ Upgraded MiniChart:
+ * - Visible bars even when values are small vs max
+ * - Auto "scaled" mode (sqrt) when one day dwarfs the rest
+ * - Premium look; never "blank" when data exists
+ */
+function MiniChart({
+  title,
+  subtitle,
+  series,
+  labels,
+  max,
+}: {
+  title: string;
+  subtitle: string;
+  series: number[];
+  labels: string[];
+  max: number;
+}) {
+  const numeric = series.map((v) => (typeof v === "number" && !Number.isNaN(v) ? v : Number(v) || 0));
+  const anyNonZero = numeric.some((v) => v > 0);
+
+  const computedMax = Math.max(1, ...numeric);
+  const safeMax = max && max > 0 ? Math.max(1, max) : computedMax;
+
+  const sorted = [...numeric].sort((a, b) => a - b);
+  const median = sorted.length ? sorted[Math.floor(sorted.length / 2)] : 0;
+  const useSqrtScale = safeMax > 0 && median > 0 && safeMax / median >= 12;
+
+  function heightPct(v: number): number {
+    if (v <= 0) return 0;
+    const raw = useSqrtScale ? (Math.sqrt(v) / Math.sqrt(safeMax)) * 100 : (v / safeMax) * 100;
+    const clamped = clamp(raw, 0, 100);
+    return clamped < 4 ? 4 : clamped; // min visible
+  }
+
+  const tickEvery = 5;
+
+  return (
+    <div className="rounded-2xl bg-gradient-to-br from-slate-950 to-slate-900 border border-slate-800 p-4 shadow-sm shadow-slate-900/40">
+      <div className="flex items-end justify-between gap-3">
+        <div>
+          <div className="text-[12px] text-slate-200 font-semibold">{title}</div>
+          <div className="text-[10px] text-slate-500">{subtitle}</div>
+        </div>
+
+        <div className="flex items-center gap-2 text-[10px] text-slate-500">
+          <span className="rounded-full border border-slate-800 bg-slate-950/60 px-2 py-1">30d</span>
+          {useSqrtScale && (
+            <span className="rounded-full border border-slate-800 bg-slate-950/60 px-2 py-1">scaled</span>
+          )}
+        </div>
+      </div>
+
+      {!anyNonZero ? (
+        <div className="mt-3 rounded-xl border border-slate-800 bg-slate-950/70 p-3">
+          <div className="text-[11px] text-slate-300 font-semibold">No data in this range</div>
+          <div className="text-[11px] text-slate-500 mt-1">
+            Nothing logged in the last 30 days for this building/shift scope.
+          </div>
+        </div>
+      ) : (
+        <>
+          <div className="mt-4 h-[150px] flex items-end gap-[3px]">
+            {numeric.map((v, i) => {
+              const pct = heightPct(v);
+              const showTick = i % tickEvery === 0 || i === numeric.length - 1;
+
+              return (
+                <div key={`${i}-${labels[i]}`} className="flex-1 min-w-[3px] group">
+                  <div
+                    className="w-full rounded-md border border-slate-800/70 bg-gradient-to-t from-sky-700/60 via-sky-600/30 to-sky-400/20 shadow-[0_0_0_1px_rgba(2,6,23,0.3)]"
+                    style={{ height: `${pct}%` }}
+                    title={`${labels[i]} • ${Number(v).toLocaleString()}`}
+                  />
+                  <div className={`mt-1 text-[9px] text-center select-none ${showTick ? "text-slate-600" : "text-transparent"}`}>
+                    {showTick ? labels[i] : "."}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="mt-2 text-[10px] text-slate-500">
+            Tip: hover any bar to see the exact value for that day.
+          </div>
+        </>
+      )}
     </div>
   );
 }
